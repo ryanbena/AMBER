@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -pthread -pg -fopenmp -rdynamic CMakeFiles/poisson.dir/src/main.o CMakeFiles/poisson.dir/src/utils.o -o poisson  -Wl,-rpath,/usr/local/cuda/lib64 libcuda_kernel.a /usr/local/cuda/lib64/libcudart.so 
