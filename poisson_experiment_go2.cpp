@@ -18,7 +18,7 @@
 #include "unitree_api/msg/request.hpp"
 #include "common/ros2_sport_client.h"
 
-#define BUF 6000
+#define BUF 24000
 
 using std::placeholders::_1;
 
@@ -30,33 +30,63 @@ public:
     soprt_request() : Node("req_sender"){
 
         h_flag = false;
+        hy_flag = false;
         t = -5; // Runing time count
 
-        pose_state_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/MacLane/pose", 10, std::bind(&soprt_request::optitrack_state_callback, this, _1));
+        pose_state_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/MacLane/pose", 1, std::bind(&soprt_request::optitrack_state_callback, this, _1));
         req_puber = this->create_publisher<unitree_api::msg::Request>("/api/sport/request", 10); // the req_puber is set to subscribe "/api/sport/request" topic with dt
         timer_ = this->create_wall_timer(std::chrono::milliseconds(int(dt * 1000)), std::bind(&soprt_request::timer_callback, this));
 
         tgrid = t;
-        hgrid = std_msgs::msg::Float64MultiArray();
-        h0grid = std_msgs::msg::Float64MultiArray();
+        hgrid.data.resize(imax*jmax);
+        //hgridy.data.resize(imax*jmax);
+        h0grid.data.resize(imax*jmax);
         
-        auto h_topic_callback = [this](std_msgs::msg::Float64MultiArray::UniquePtr msg) -> void {
+        auto hgrid_topic_callback = [this](std_msgs::msg::Float64MultiArray::SharedPtr msg) -> void {
             
             dtgrid = t - tgrid;
             tgrid = t;
-
-            h0grid.data = hgrid.data;
-            hgrid.data = msg->data;
-
+            memcpy(&h0grid.data[0], &hgrid.data[0], sizeof(double)*imax*jmax);
+            memcpy(&hgrid.data[0], &msg->data[0], sizeof(double)*imax*jmax);
             if(!h_flag){
                 h_flag = true;
                 std::cout << "First Grid Received!" << std::endl;
             }
-            //std::cout << "New Grid Received!" << std::endl;
             
         };
+        hgrid_subscription_ = this->create_subscription<std_msgs::msg::Float64MultiArray>("safety_grid_topic", 1, hgrid_topic_callback);
 
-        h_subscription_ = this->create_subscription<std_msgs::msg::Float64MultiArray>("safety_grid_topic", 1, h_topic_callback);
+/*
+        auto hgridy_topic_callback = [this](std_msgs::msg::Float64MultiArray::SharedPtr msgy) -> void {
+        
+            memcpy(&hgridy.data[0], &msgy->data[0], sizeof(double)*imax*jmax);
+            if(!hy_flag){
+                hy_flag = true;
+                std::cout << "First Epsilon Grid Received!" << std::endl;
+            }
+            
+        };
+        hgridy_subscription_ = this->create_subscription<std_msgs::msg::Float64MultiArray>("eps_safety_grid_topic", 1, hgridy_topic_callback);
+
+*/
+/*
+        auto hdata_topic_callback = [this](std_msgs::msg::Float64MultiArray::UniquePtr msg) -> void {
+
+            //hdata.data = msg->data;
+            h = msg->data[0];
+            dhdt = msg->data[1];
+            dhdyaw = msg->data[2];
+            gradhx = msg->data[3];
+            gradhy = msg->data[4];
+
+            if(!h_flag){
+                h_flag = true;
+                std::cout << "First Data Received!" << std::endl;
+            }
+            
+        };
+        hdata_subscription_ = this->create_subscription<std_msgs::msg::Float64MultiArray>("safety_data_topic", 1, hdata_topic_callback);
+*/
         sport_req.SwitchGait(req, 0);
         req_puber->publish(req);
         sleep(1);
@@ -79,15 +109,19 @@ private:
 
         if(t > 0.0){
 
+            const double t_idle = 0.0;
+            const double t_walk = 120.0;
+
             // Define Reference Trajectory
-            //const double amp = 1.0;
-            //const double freq = 1.0 / 20.0;
-            //double w = 2.0 * M_PI * freq;
-            //rxd = amp*sin(w*t) + 1.5;
-            //ryd = amp*sin(w*t) + 1.5;
-            //double vxd = amp*w*cos(w*t);
-            //double vyd = amp*w*cos(w*t);
-            
+            const double amp = 0.0;
+            const double freq = 1.0 / 20.0;
+            double w = 2.0 * M_PI * freq;
+            rxd = amp*sin(w*t) + 1.5;
+            ryd = amp*sin(w*t) + 1.5;
+            double vxd = amp*w*cos(w*t);
+            double vyd = amp*w*cos(w*t);
+
+            /*
             // Initial Position
             double rx0, ry0;
             const int test_case = 3;
@@ -101,19 +135,17 @@ private:
                     ry0 = 1.3;
                     break;
                 case 3:
-                    rx0 = 1.8;
-                    ry0 = 2.6;
+                    rx0 = 1.5;
+                    ry0 = 2.0;
                     break;
             }
 
             // Final Position
-            double rxf = 0.5;
-            double ryf = 2.5;
+            double rxf = 1.5;
+            double ryf = 0.5;
 
             // Reference
-            const double t_idle = 5.0;
-            const double t_walk = 25.0;
-            if(t < 5.0){
+            if(t < t_idle){
                 rxd = rx0;
                 ryd = ry0;
                 vxd = 0.0;
@@ -126,23 +158,24 @@ private:
                 vxd = (rxf-rx0) / t_walk;
                 vyd = (ryf-ry0) / t_walk;
             }
-            
+            */
+
             // Compute Errors
             double rxe = rxd - rx;
             double rye = ryd - ry;
             
             // Define Reference Yaw
-            double rxe_yaw = rxf - rx;
-            double rye_yaw = ryf - ry;
-            double err = sqrt(rxe_yaw*rxe_yaw+rye_yaw*rye_yaw);
-            if(err > 0.35){
-                yawd = atan2(rye_yaw,rxe_yaw);
-            }
-            double yawe = ang_diff(yawd, yaw);
+            //double rxe_yaw = rxf - rx;
+            //double rye_yaw = ryf - ry;
+            //double err = sqrt(rxe_yaw*rxe_yaw+rye_yaw*rye_yaw);
+            //if(err > 0.35){
+            //    yawd = atan2(rye_yaw,rxe_yaw);
+            //}
+            //double yawe = ang_diff(yawd, yaw);
             
             // Proportional Control + Tracking
-            const double kpy = 1.0;
-            vyaw = kpy * yawe + vyawd;
+            //const double kpy = 1.0;
+            //vyaw = kpy * yawe + vyawd;
 
             const double kpv = 0.5;
             vx = kpv * rxe + vxd;
@@ -150,7 +183,6 @@ private:
 
             vx = fmin(fmax(vx, -1.0), 1.0);
             vy = fmin(fmax(vy, -1.0), 1.0);
-            
 
             if(h_flag){
 
@@ -168,13 +200,14 @@ private:
                 // Get Safety Function Value
                 h = bilinear_interpolation(&hgrid, ic, jc);
                 h0 = bilinear_interpolation(&h0grid, ic, jc);
+
                 if(h < 0.0){
                     std::cout << "Safety Violation!: " << h << std::endl;
                 } 
 
                 // Compute Time Derivative
                 double dhdt_raw = (h - h0) / dtgrid;
-                const double wv = 10.0; // Low Pass Filter Cutoff
+                const double wv = 30.0; // Low Pass Filter Cutoff
                 double kv = 1.0 - exp(-wv*dtgrid);
                 dhdt *= 1.0 - kv;
                 dhdt += kv * dhdt_raw;
@@ -186,7 +219,7 @@ private:
                 double jm = jc - i_eps;
                 gradhx = (bilinear_interpolation(&hgrid, ic, jp) - bilinear_interpolation(&hgrid, ic, jm)) / (2.0 * x_eps);
                 gradhy = (bilinear_interpolation(&hgrid, ip, jc) - bilinear_interpolation(&hgrid, im, jc)) / (2.0 * x_eps);
-                
+
                 // Single Integrator Safety Filter
                 const double alpha = 0.8;
                 const double issf = 4.0;
@@ -199,7 +232,6 @@ private:
 
                 vxs = -a * gradhx / b;
                 vys = -a * gradhy / b;
-                //std::cout << "vxs: " << vxs << ", vys: " << vys << std::endl;
 
                 if(a<=0.0){
                     vx += vxs;
@@ -207,6 +239,26 @@ private:
                 }
 
             }
+            
+            /*
+            vyaw = 0.0;
+            if(h_flag && hy_flag){
+                double iry = (double)imax - (ry+rc[1]) / ds;
+                double jry = (rx+rc[0]) / ds;
+                double icy = fmin(fmax(i_eps, iry), (double)(imax-1)-i_eps); // Saturated Because Numerical Derivatives Shrink Effective Grid Size
+                double jcy = fmin(fmax(i_eps, jry), (double)(jmax-1)-i_eps);
+                hy = bilinear_interpolation(&hgridy, icy, jcy);
+                const double kpy = 5.0;
+                double yaw_eps = 1.0 * M_PI / 180.0;
+                dhdyaw = (hy - h) / yaw_eps;
+                vyaw = kpy*dhdyaw;
+            }
+            */
+            
+            const double yawd = 0.0 * M_PI / 180.0;
+            double yawe = ang_diff(yawd,yaw);
+            const double kpy = 0.5;
+            vyaw = kpy * yawe;
 
             double vxb = cos(yaw)*vx+ sin(yaw)*vy;
             double vyb = -sin(yaw)*vx + cos(yaw)*vy;
@@ -217,8 +269,7 @@ private:
             // Send Command
             sport_req.Move(req, (float)vxb, (float)vyb, (float)vyaw);
             req_puber->publish(req);
-            //std::cout << "Moving!" << t << std::endl;
-
+            //std::cout << "Command Sent!" << vxb << "," << vyb << std::endl;
             logData();
 
             if(t >= (t_idle+t_walk)){
@@ -353,7 +404,9 @@ private:
     }
 
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_state_suber;
-    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr h_subscription_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr hgrid_subscription_;
+    //rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr hgridy_subscription_;
+    //rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr hdata_subscription_;
 
     rclcpp::TimerBase::SharedPtr timer_; // ROS2 timer
     
@@ -363,6 +416,7 @@ private:
     SportClient sport_req;
 
     bool h_flag = false;
+    bool hy_flag = false;
 
     double t; // runing time count
     double dt = 0.005; //control time step
@@ -375,7 +429,8 @@ private:
     double vx, vy, vyaw, vxd, vyd;
     double vyawd = 0.0;
     double vxs, vys;
-    double h, h0, dhdt, gradhx, gradhy;
+    double h, dhdt, dhdyaw, gradhx, gradhy;
+    double h0, hy;
     
     double tbuffer[BUF];
     double xbuffer[BUF];
@@ -393,7 +448,9 @@ private:
     const int jmax = 120;
     const double ds = 0.0254;
     std_msgs::msg::Float64MultiArray hgrid;
+    //std_msgs::msg::Float64MultiArray hgridy;
     std_msgs::msg::Float64MultiArray h0grid;
+    //std_msgs::msg::Float64MultiArray hdata;
 
 };
 
