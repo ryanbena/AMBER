@@ -5,6 +5,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import UInt8MultiArray
+from std_msgs.msg import Float32MultiArray
 
 import torch
 from sam2.build_tam import build_tam_camera_predictor
@@ -67,6 +68,15 @@ class OccupancyGridPublisher(Node):
         super().__init__('occupancy_grid_node')
         self.publisher_ = self.create_publisher(UInt8MultiArray, 'occ_grid_topic', 1)
 
+
+class OpticalFlowPublisher(Node):
+    
+    def __init__(self):
+
+        super().__init__('optical_flow_node')
+        self.publisher_ = self.create_publisher(Float32MultiArray, 'optical_flow_topic', 1)
+
+
 def main(args=None):
     
     global points, labels, cvImage, mask, group, groups
@@ -74,11 +84,13 @@ def main(args=None):
     # Initialize ROS node
     rclpy.init(args=args)
     occupancy_grid_publisher = OccupancyGridPublisher()
+    optical_flow_publisher = OpticalFlowPublisher()
 
     init = sl.InitParameters()
-    init.camera_fps = 60
-    init.camera_resolution = sl.RESOLUTION.HD720
+    #init.camera_resolution = sl.RESOLUTION.HD720
+    init.camera_resolution = sl.RESOLUTION.VGA
     init.depth_mode = sl.DEPTH_MODE.NONE
+    init.camera_fps = 100
     cam = sl.Camera()
     
     status = cam.open(init)
@@ -96,19 +108,30 @@ def main(args=None):
     print_camera_information(cam)
     print_help()
 
-    cam.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, 30)
+    #cam.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, 30)
 
     key = ''
 
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
 
+        err = cam.grab(runtime)
+        cam.retrieve_image(mat, sl.VIEW.LEFT)  # Retrieve left image
+        cvImRaw = mat.get_data()  # Convert sl.Mat to cv2.Mat
+        cvImage = cv2.flip(cv2.flip(cvImRaw, 0), 1)
+        #sqImage = cvImage[:,280:1000,:] # Crop 1280x720 Image to 720x720
+        sqImage = cvImage[7:367,156:516,0:3] # Crop 672x376 Image to 360x360
+        prvs = cv2.cvtColor(sqImage, cv2.COLOR_BGR2GRAY)
+
         # Phase #1: #Initialization
         err = cam.grab(runtime)
         if err == sl.ERROR_CODE.SUCCESS:  # Check that a new image is successfully acquired
             cam.retrieve_image(mat, sl.VIEW.LEFT)  # Retrieve left image
-            cvImage = mat.get_data()  # Convert sl.Mat to cv2.Mat
-            sqImage = cvImage[:,280:1000,:] # Crop 1280x720 Image to 720x720
-            predictor.load_first_frame(sqImage[:,:,0:3])
+            cvImRaw = mat.get_data()  # Convert sl.Mat to cv2.Mat
+            cvImage = cv2.flip(cv2.flip(cvImRaw, 0), 1)
+            #sqImage = cvImage[:,280:1000,:] # Crop 1280x720 Image to 720x720
+            sqImage = cvImage[7:367,156:516,0:3] # Crop 672x376 Image to 360x360
+            
+            predictor.load_first_frame(sqImage)
             while key != 13:  # for 'enter' key
                 if key != -1:
                     group = key
@@ -128,7 +151,7 @@ def main(args=None):
                 key = cv2.waitKey(1)
         else:
             print("Error during capture : ", err)
-
+        
         # Phase #2: Tracking
         while key != 113:  # for 'q' key
             if key != -1:
@@ -140,15 +163,19 @@ def main(args=None):
             if err == sl.ERROR_CODE.SUCCESS:  # Check that a new image is successfully acquired
                 
                 cam.retrieve_image(mat, sl.VIEW.LEFT)  # Retrieve left image
-                cvImage = mat.get_data()  # Convert sl.Mat to cv2.Mat
-                sqImage = cvImage[:,280:1000,:] # Crop 1280x720 Image to 720x720
-                group_inds, mask = predictor.track(sqImage[:,:,0:3])
+                cvImRaw = mat.get_data()  # Convert sl.Mat to cv2.Mat
+                cvImage = cv2.flip(cv2.flip(cvImRaw, 0), 1)
+                #sqImage = cvImage[:,280:1000,:] # Crop 1280x720 Image to 720x720
+                sqImage = cvImage[7:367,156:516,0:3] # Crop 672x376 Image to 376x376
+                
+                next = cv2.cvtColor(sqImage, cv2.COLOR_BGR2GRAY)
+                
+                group_inds, mask = predictor.track(sqImage)
             
                 sqGrid = cv2.cvtColor(sqImage, cv2.COLOR_BGR2GRAY)
                 sqGrid *= 0
 
                 for g in range(len(group_inds)):
-                    #if g != 0:
                     mask_squeezed = mask[g,:].cpu().squeeze(0).squeeze(0)
                     sqImage[mask_squeezed>0,0] = 10 + 100*g % 255
                     sqImage[mask_squeezed>0,1] = 255 - 100*g % 255
@@ -161,14 +188,26 @@ def main(args=None):
                 smGrid = cv2.resize(sqGrid, (imax,jmax)) # Downsample to imax x jmax
                 arrGrid = np.reshape(smGrid, imax*jmax)
 
-                msg2 = UInt8MultiArray()
-                msg2.data = arrGrid
-                occupancy_grid_publisher.publisher_.publish(msg2)
+                msg1 = UInt8MultiArray()
+                msg1.data = arrGrid
+                occupancy_grid_publisher.publisher_.publish(msg1)
 
+                flow = cv2.calcOpticalFlowFarneback(prvs, next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+                prvs = next
+                
+                smOFi = cv2.resize(flow[...,0], (imax,jmax)) # Downsample to imax x jmax
+                smOFj = cv2.resize(flow[...,1], (imax,jmax)) # Downsample to imax x jmax
+                arrOFi= np.reshape(smOFi, imax*jmax)
+                arrOFj= np.reshape(smOFj, imax*jmax)
+                msg2 = Float32MultiArray()
+                msg2.data = np.concatenate((arrOFi,arrOFj))
+                optical_flow_publisher.publisher_.publish(msg2)
+                
+                bigImage = cv2.resize(sqImage, (720,720), interpolation=cv2.INTER_NEAREST_EXACT)
                 if view:
-                    cv2.imshow(win_name, sqImage)  # Display image
+                    cv2.imshow(win_name, bigImage)  # Display image
                 else:
-                    cv2.imshow(win_name, cv2.flip(cv2.flip(sqImage, 0), 1))  # Display image
+                    cv2.imshow(win_name, cv2.flip(cv2.flip(bigImage, 0), 1))  # Display image
             
             else:
                 print("Error during capture : ", err)
