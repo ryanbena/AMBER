@@ -15,10 +15,6 @@ model_cfg = "configs/sam2.1/efficienttam_ti_512x512.yaml"
 predictor = build_tam_camera_predictor(model_cfg, checkpoint)
 
 # Global variable
-camera_settings = sl.VIDEO_SETTINGS.BRIGHTNESS
-str_camera_settings = "BRIGHTNESS"
-step_camera_settings = 1
-led_on = True
 select_in_progress = False
 origin_rect = (-1, -1)
 points = []
@@ -29,7 +25,7 @@ mask = torch.empty((0,1), dtype=torch.float32)
 
 # Function that handles mouse events when interacting with the OpenCV window.
 def on_mouse(event, x, y, flags, param):
-    global select_in_progress, selection_rect, origin_rect, points, labels, cvImage, mask, group, groups, ind
+    global select_in_progress, origin_rect, points, labels, cvImage, mask, group, groups, ind
     if event == cv2.EVENT_LBUTTONDOWN:
         origin_rect = (x, y)
         select_in_progress = True
@@ -96,14 +92,12 @@ def main(args=None):
     status = cam.open(init)
     while status != sl.ERROR_CODE.SUCCESS:
         status = cam.open(init)
-        #print("Camera Open : " + repr(status) + ". Exit program.")
-        #exit()
     view = True
 
     runtime = sl.RuntimeParameters()
     mat = sl.Mat()
     win_name = "Camera View"
-    cv2.namedWindow(win_name)
+    cv2.namedWindow(win_name, flags=cv2.WINDOW_AUTOSIZE | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
     cv2.setMouseCallback(win_name, on_mouse)
     print_camera_information(cam)
     print_help()
@@ -114,13 +108,19 @@ def main(args=None):
 
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
 
+        imax = 120
+        jmax = 120
+        
         err = cam.grab(runtime)
         cam.retrieve_image(mat, sl.VIEW.LEFT)  # Retrieve left image
         cvImRaw = mat.get_data()  # Convert sl.Mat to cv2.Mat
         cvImage = cv2.flip(cv2.flip(cvImRaw, 0), 1)
         #sqImage = cvImage[:,280:1000,:] # Crop 1280x720 Image to 720x720
         sqImage = cvImage[7:367,156:516,0:3] # Crop 672x376 Image to 360x360
-        prvs = cv2.cvtColor(sqImage, cv2.COLOR_BGR2GRAY)
+        
+        smImage = cv2.resize(sqImage, (imax,jmax))
+        prvs = cv2.cvtColor(smImage, cv2.COLOR_BGR2GRAY)
+        flow0 = cv2.calcOpticalFlowFarneback(prvs, prvs, None, 0.5, 20, 15, 20, 7, 1.5, 0)
 
         # Phase #1: #Initialization
         err = cam.grab(runtime)
@@ -168,13 +168,10 @@ def main(args=None):
                 #sqImage = cvImage[:,280:1000,:] # Crop 1280x720 Image to 720x720
                 sqImage = cvImage[7:367,156:516,0:3] # Crop 672x376 Image to 376x376
                 
-                next = cv2.cvtColor(sqImage, cv2.COLOR_BGR2GRAY)
-                
                 group_inds, mask = predictor.track(sqImage)
-            
-                sqGrid = cv2.cvtColor(sqImage, cv2.COLOR_BGR2GRAY)
-                sqGrid *= 0
 
+                sqGrid = cv2.cvtColor(sqImage, cv2.COLOR_BGR2GRAY)                
+                sqGrid *= 0
                 for g in range(len(group_inds)):
                     mask_squeezed = mask[g,:].cpu().squeeze(0).squeeze(0)
                     sqImage[mask_squeezed>0,0] = 10 + 100*g % 255
@@ -182,32 +179,25 @@ def main(args=None):
                     sqImage[mask_squeezed>0,2] = 100
                     sqGrid[mask_squeezed>0] = 255
 
-                imax = 120
-                jmax = 120
-
-                smGrid = cv2.resize(sqGrid, (imax,jmax)) # Downsample to imax x jmax
+                smGrid = cv2.resize(sqGrid, (imax,jmax), interpolation=cv2.INTER_LANCZOS4) # Downsample to imax x jmax
                 arrGrid = np.reshape(smGrid, imax*jmax)
+
+                #flow = cv2.calcOpticalFlowFarneback(prvs, smGrid, flow0, 0.5, 2, 25, 20, 7, 1.5, 0)
+                #flow0 = flow
+                #prvs = smGrid
 
                 msg1 = UInt8MultiArray()
                 msg1.data = arrGrid
                 occupancy_grid_publisher.publisher_.publish(msg1)
 
-                flow = cv2.calcOpticalFlowFarneback(prvs, next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-                prvs = next
+                #msg2 = Float32MultiArray()
+                #arrOFj= np.reshape(flow[...,0], imax*jmax)
+                #arrOFi= np.reshape(flow[...,1], imax*jmax)
+                #msg2.data = np.concatenate((arrOFi,arrOFj))
+                #optical_flow_publisher.publisher_.publish(msg2)
                 
-                smOFi = cv2.resize(flow[...,0], (imax,jmax)) # Downsample to imax x jmax
-                smOFj = cv2.resize(flow[...,1], (imax,jmax)) # Downsample to imax x jmax
-                arrOFi= np.reshape(smOFi, imax*jmax)
-                arrOFj= np.reshape(smOFj, imax*jmax)
-                msg2 = Float32MultiArray()
-                msg2.data = np.concatenate((arrOFi,arrOFj))
-                optical_flow_publisher.publisher_.publish(msg2)
-                
-                bigImage = cv2.resize(sqImage, (720,720), interpolation=cv2.INTER_NEAREST_EXACT)
-                if view:
-                    cv2.imshow(win_name, bigImage)  # Display image
-                else:
-                    cv2.imshow(win_name, cv2.flip(cv2.flip(bigImage, 0), 1))  # Display image
+                #bigImage = cv2.resize(sqImage, (720,720), interpolation=cv2.INTER_LANCZOS4)
+                cv2.imshow(win_name, sqImage)  # Display image
             
             else:
                 print("Error during capture : ", err)
