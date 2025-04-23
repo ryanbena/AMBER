@@ -95,18 +95,18 @@ float trilinear_interpolation(const float *grid, const float i, const float j, c
         return (k2f - k) * f1 + (k - k1f) * f2;
     }
     else if((i1 != i2) && (j1 != j2)){
-        const float f1 = (i2 - i) * grid[(int)k*IMAX*JMAX+i1*JMAX+j1] + (i - i1) * grid[(int)k*IMAX*JMAX+i2*JMAX+j1];
-        const float f2 = (i2 - i) * grid[(int)k*IMAX*JMAX+i1*JMAX+j2] + (i - i1) * grid[(int)k*IMAX*JMAX+i2*JMAX+j2];
-        return (j2 - j) * f1 + (j - j1) * f2;
+        const float f1 = (i2f - i) * grid[(int)k*IMAX*JMAX+i1*JMAX+j1] + (i - i1f) * grid[(int)k*IMAX*JMAX+i2*JMAX+j1];
+        const float f2 = (i2f - i) * grid[(int)k*IMAX*JMAX+i1*JMAX+j2] + (i - i1f) * grid[(int)k*IMAX*JMAX+i2*JMAX+j2];
+        return (j2f - j) * f1 + (j - j1f) * f2;
     }
     else if(k1 != k2){
-        return (k2 - k) * grid[k1*IMAX*JMAX+(int)i*JMAX+(int)j] + (k - k1) * grid[k2*IMAX*JMAX+(int)i*JMAX+(int)j];
+        return (k2f - k) * grid[k1*IMAX*JMAX+(int)i*JMAX+(int)j] + (k - k1f) * grid[k2*IMAX*JMAX+(int)i*JMAX+(int)j];
     }
     else if(i1 != i2){
-        return (i2 - i) * grid[(int)k*IMAX*JMAX+i1*JMAX+(int)j] + (i - i1) * grid[(int)k*IMAX*JMAX+i2*JMAX+(int)j];
+        return (i2f - i) * grid[(int)k*IMAX*JMAX+i1*JMAX+(int)j] + (i - i1f) * grid[(int)k*IMAX*JMAX+i2*JMAX+(int)j];
     }
     else if(j1 != j2){
-        return (j2 - j) * grid[(int)k*IMAX*JMAX+(int)i*JMAX+j1] + (j - j1) * grid[(int)k*IMAX*JMAX+(int)i*JMAX+j2];
+        return (j2f - j) * grid[(int)k*IMAX*JMAX+(int)i*JMAX+j1] + (j - j1f) * grid[(int)k*IMAX*JMAX+(int)i*JMAX+j2];
     }
     else{
         return grid[(int)k*IMAX*JMAX+(int)i*JMAX+(int)j];
@@ -117,10 +117,10 @@ float trilinear_interpolation(const float *grid, const float i, const float j, c
 /* Perform a bilinear interpolation on a 2-D grid */
 float bilinear_interpolation(const float *grid, const float i, const float j){
 
-    const float i1f = floor(i);
-    const float j1f = floor(j);
-    const float i2f = ceil(i);
-    const float j2f = ceil(j);
+    const float i1f = floorf(i);
+    const float j1f = floorf(j);
+    const float i2f = ceilf(i);
+    const float j2f = ceilf(j);
 
     const int i1 = (int)i1f;
     const int j1 = (int)j1f;
@@ -128,15 +128,15 @@ float bilinear_interpolation(const float *grid, const float i, const float j){
     const int j2 = (int)j2f;
 
     if((i1 != i2) && (j1 != j2)){
-        const float f1 = (i2 - i) * grid[i1*JMAX+j1] + (i - i1) * grid[i2*JMAX+j1];
-        const float f2 = (i2 - i) * grid[i1*JMAX+j2] + (i - i1) * grid[i2*JMAX+j2];
-        return (j2 - j) * f1 + (j - j1) * f2;
+        const float f1 = (i2f - i) * grid[i1*JMAX+j1] + (i - i1f) * grid[i2*JMAX+j1];
+        const float f2 = (i2f - i) * grid[i1*JMAX+j2] + (i - i1f) * grid[i2*JMAX+j2];
+        return (j2f - j) * f1 + (j - j1f) * f2;
     }
     else if(i1 != i2){
-        return (i2 - i) * grid[i1*JMAX+(int)j] + (i - i1) * grid[i2*JMAX+(int)j];
+        return (i2f - i) * grid[i1*JMAX+(int)j] + (i - i1f) * grid[i2*JMAX+(int)j];
     }
     else if(j1 != j2){
-        return (j2 - j) * grid[(int)i*JMAX+j1] + (j - j1) * grid[(int)i*JMAX+j2];
+        return (j2f - j) * grid[(int)i*JMAX+j1] + (j - j1f) * grid[(int)i*JMAX+j2];
     }
     else{
         return grid[(int)i*JMAX+(int)j];

@@ -5,7 +5,7 @@
 #include <vector>
 
 namespace Kernel{
-    int Poisson(float *h, const float *f, const float *b, const float relTol, const float N);
+    int Poisson(float *h, const float *f, const float *b, const float relTol, const float w_SOR);
 }
 
 #endif

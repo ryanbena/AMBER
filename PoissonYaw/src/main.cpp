@@ -19,6 +19,16 @@
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include "std_msgs/msg/u_int8_multi_array.hpp"
 
+#include <termios.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <arpa/inet.h>
+
+#define KEY_UP 65
+#define KEY_DOWN 66
+#define KEY_RIGHT 67
+#define KEY_LEFT 68
+
 class PoissonControllerNode : public rclcpp::Node{
 
     public:
@@ -52,8 +62,8 @@ class PoissonControllerNode : public rclcpp::Node{
             mpc_controller.solve();
 
             hgrid_message.data.resize(IMAX*JMAX);
-            u_message.data.resize(10);
-            mpc_message.data.resize(mpc_controller.nZ);
+            u_message.data.resize(4);
+            mpc_message.data.resize(mpc_controller.nZ+2);
             
             rclcpp::SubscriptionOptions options1;
             rclcpp::SubscriptionOptions options2;
@@ -62,15 +72,20 @@ class PoissonControllerNode : public rclcpp::Node{
             options2.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
             options3.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
-            hgrid_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("safety_grid_topic", 1);
-            u_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("safety_command_topic", 1);
-            mpc_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("mpc_solution_topic", 1);
+            rclcpp::QoS qos_profile(5);
+            qos_profile.reliability(rclcpp::ReliabilityPolicy::BestEffort);
+            qos_profile.history(rclcpp::HistoryPolicy::KeepLast);
+
+            hgrid_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("safety_grid_topic", qos_profile);
+            u_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("safety_command_topic", qos_profile);
+            mpc_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("mpc_solution_topic", qos_profile);
             occ_grid_suber_ = this->create_subscription<std_msgs::msg::UInt8MultiArray>("occ_grid_topic", 1, std::bind(&PoissonControllerNode::occ_grid_callback, this, std::placeholders::_1), options1);
             optflow_suber_ = this->create_subscription<std_msgs::msg::Float32MultiArray>("optical_flow_topic", 1, std::bind(&PoissonControllerNode::optical_flow_callback, this, std::placeholders::_1), options2);
-            pose_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/MacLane/pose", 1, std::bind(&PoissonControllerNode::optitrack_state_callback, this, std::placeholders::_1), options3);
+            //pose_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/MacLane/pose", 1, std::bind(&PoissonControllerNode::optitrack_state_callback, this, std::placeholders::_1), options3);
+            pose_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/Shakira/pose", 1, std::bind(&PoissonControllerNode::optitrack_state_callback, this, std::placeholders::_1), options3);
 
             // Create Timer for Reference
-            const float ref_period = 0.1f;
+            const float ref_period = 0.01f;
             auto ref_timer_period = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<float>(ref_period));
             ref_timer_ = this->create_wall_timer(ref_timer_period, std::bind(&PoissonControllerNode::reference_callback, this));
             
@@ -79,18 +94,55 @@ class PoissonControllerNode : public rclcpp::Node{
             auto mpc_timer_period = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<float>(mpc_period));
             mpc_timer_ = this->create_wall_timer(mpc_timer_period, std::bind(&PoissonControllerNode::mpc_callback, this));
             
+            // Define Reference Trajectory
+            rxd = 1.75f;
+            ryd = 1.75f;
+            yawd = 0.0f;
+
+            openG1Socket("169.254.21.27", 5005);
+        
         }
 
     private:
 
+        void openG1Socket(const std::string& ip_address, int port){
+
+            g1_socket = socket(AF_INET, SOCK_DGRAM, 0); // Create socket
+            dest_addr.sin_family = AF_INET;
+            dest_addr.sin_port = htons(port);
+            inet_pton(AF_INET, ip_address.c_str(), &dest_addr.sin_addr);
+        
+        }
+        
+        void moveG1(float *yaw, float *vx, float *vy, float *vyaw){
+        
+            std::vector<uint8_t> buffer(16); // Create buffer to hold packed data (4 floats = 16 bytes)
+            memcpy(&buffer[0], yaw, 4);
+            memcpy(&buffer[4], vx, 4);
+            memcpy(&buffer[8], vy, 4);
+            memcpy(&buffer[12], vyaw, 4);
+            sendto(g1_socket, buffer.data(), buffer.size(), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr)); // Send the packed data
+        
+        }
+        
         void reference_callback(void){
             
-            // Define Reference Trajectory
-            rxd = 1.75f;
-            ryd = 1.75f;
+            char ch;
+            if (read(STDIN_FILENO, &ch, 1) > 0) {
+
+                // Define Reference Trajectory
+                if(ch == KEY_UP) rxd -= 0.01f;
+                if(ch == KEY_DOWN) rxd += 0.01f;
+                if(ch == KEY_LEFT) ryd -= 0.01f;
+                if(ch == KEY_RIGHT) ryd += 0.01f;
+            
+            }
 
             // Define Reference Heading
-            yawd = 0.0f;
+            //const float rxe = rxd - rx;
+            //const float rye = ryd - ry;
+            //const float err = sqrtf(rxe*rxe+rye*rye);
+            //if(err > 0.4f) yawd = atan2f(rye,rxe);
 
         };   
     
@@ -141,27 +193,44 @@ class PoissonControllerNode : public rclcpp::Node{
 
             float b0[IMAX*JMAX];
             memcpy(b0, bound, IMAX*JMAX*sizeof(float));
-            for(int i = 0; i < IMAX; i++){
-                for(int j = 0; j < JMAX; j++){
-                    if(b0[i*JMAX+j]==1.0f){
-                        if(b0[(i+1)*JMAX+j]==-1.0f) bound[i*JMAX+j] = 0.0f;
-                        if(b0[(i-1)*JMAX+j]==-1.0f) bound[i*JMAX+j] = 0.0f;
-                        if(b0[i*JMAX+(j+1)]==-1.0f) bound[i*JMAX+j] = 0.0f;
-                        if(b0[i*JMAX+(j-1)]==-1.0f) bound[i*JMAX+j] = 0.0f;
-                        if(b0[(i+1)*JMAX+(j+1)]==-1.0f) bound[i*JMAX+j] = 0.0f;
-                        if(b0[(i-1)*JMAX+(j+1)]==-1.0f) bound[i*JMAX+j] = 0.0f;
-                        if(b0[(i-1)*JMAX+(j-1)]==-1.0f) bound[i*JMAX+j] = 0.0f;
-                        if(b0[(i+1)*JMAX+(j-1)]==-1.0f) bound[i*JMAX+j] = 0.0f;
-                    }
+            for(int n = 0; n < IMAX*JMAX; n++){
+                if(b0[n]==1.0f){
+                    if(b0[n+1]==-1.0f || 
+                       b0[n-1]==-1.0f || 
+                       b0[n+JMAX]==-1.0f || 
+                       b0[n-JMAX]==-1.0f || 
+                       b0[n+JMAX+1]==-1.0f || 
+                       b0[n-JMAX+1]==-1.0f || 
+                       b0[n+JMAX-1]==-1.0f || 
+                       b0[n-JMAX-1]==-1.0f) bound[n] = 0.0f;
                 }
             }
 
         };
 
         /* Find Boundaries (Any Unoccupied Point that Borders an Occupied Point) */
-        void fix_boundary(float *grid, const float *bound){
+        void find_and_fix_boundary(float *grid, float *bound){
             
+            // Set Border
+            for(int i = 0; i < IMAX; i++){
+                for(int j = 0; j < JMAX; j++){
+                    if(i==0 || i==(IMAX-1) || j==0 || j==(JMAX-1)) bound[i*JMAX+j] = 0.0f;
+                }
+            }
+
+            float b0[IMAX*JMAX];
+            memcpy(b0, bound, IMAX*JMAX*sizeof(float));
             for(int n = 0; n < IMAX*JMAX; n++){
+                if(b0[n]==1.0f){
+                    if(b0[n+1]==-1.0f || 
+                       b0[n-1]==-1.0f || 
+                       b0[n+JMAX]==-1.0f || 
+                       b0[n-JMAX]==-1.0f || 
+                       b0[n+JMAX+1]==-1.0f || 
+                       b0[n-JMAX+1]==-1.0f || 
+                       b0[n+JMAX-1]==-1.0f || 
+                       b0[n-JMAX-1]==-1.0f) bound[n] = 0.0f;
+                }
                 if(!bound[n]) grid[n] = h0;
             }
 
@@ -171,21 +240,22 @@ class PoissonControllerNode : public rclcpp::Node{
         void inflate_occupancy_grid(float *bound, const float yawk){
 
             /* Step 1: Create Robot Kernel */
-            const float length = 0.80f; // Go2
-            const float width = 0.40f;
-            //const float length = 0.50f; // G1
-            //const float width = 0.50f;
+            //const float length = 0.76f; // Go2
+            //const float width = 0.35f;
+            const float length = 0.35f; // G1
+            const float width = 1.02f;
             //const float length = 0.40f; // Drone
             //const float width = 0.40f;
             
             const float D = sqrtf(length*length + width*width); // Max Robot Dimension to Define Kernel Size
-            const int dim = ceil((ceil(D / DS) + 1.0f) / 2.0f) * 2.0f - 1.0f;
+            const int dim = ceilf((ceilf(D / DS) + 1.0f) / 2.0f) * 2.0f - 1.0f;
             float robot_grid[dim*dim];
 
-            const float MOS = 1.0f;
+            const float MOS = 1.4f;
             const float ar = MOS * length / 2.0f;
             const float br = MOS * width / 2.0f;
 
+            const float expo = 4.0f;
             for(int i = 0; i < dim; i++){
                 const float yi = (float)(dim-1-i)*DS - D/2.0f;
                 for(int j = 0; j < dim; j++){
@@ -193,8 +263,9 @@ class PoissonControllerNode : public rclcpp::Node{
                     const float xi = (float)j*DS - D/2.0f;
                     const float xb = cosf(yawk)*xi + sinf(yawk)*yi;
                     const float yb = -sinf(yawk)*xi + cosf(yawk)*yi;
-                    const float dist = powf(xb/ar, 4.0f) + powf(yb/br, 4.0f);
+                    const float dist = powf(fabsf(xb/ar), expo) + powf(fabsf(yb/br), expo);
                     if(dist <= 1.0f) robot_grid[i*dim+j] = -1.0f;
+                    //if(fabsf(xb/ar) <= 1.0f && fabsf(yb/br) <= 1.0f) robot_grid[i*dim+j] = -1.0f;
                 }
             }
         
@@ -303,34 +374,40 @@ class PoissonControllerNode : public rclcpp::Node{
 
             float perimeter_c = 0.0f;
             float area_c = 0.0f;
+            
             for(int i = 1; i < IMAX-1; i++){
                 for(int j = 1; j < JMAX-1; j++){
                     if(bound[i*JMAX+j] == 0.0f) perimeter_c += DS;
-                    if(bound[i*JMAX+j] < 0.0f) area_c += DS*DS;
+                    else if(bound[i*JMAX+j] < 0.0f) area_c += DS*DS;
                 }
             }
+            
             float perimeter_o = 2.0f*(float)IMAX*DS + 2.0f*(float)JMAX*DS + perimeter_c;
             float area_o = (float)IMAX*(float)JMAX*DS*DS - area_c;
-            float force_o = -dh0 * perimeter_o / area_o;
+            float force_o = -dh0 * perimeter_o / area_o * DS*DS;
             float force_c = 0.0f;
-            if(area_c != 0.0f) force_c = dh0 * perimeter_c / area_c;
-            for(int i = 0; i < IMAX; i++){
-                for(int j = 0; j < JMAX; j++){
-                    if(bound[i*JMAX+j] > 0.0f) force[i*JMAX+j] = force_o;
-                    if(bound[i*JMAX+j] == 0.0f) force[i*JMAX+j] = 0.0f;
-                    if(bound[i*JMAX+j] < 0.0f) force[i*JMAX+j] = force_c;
+            if(area_c != 0.0f) force_c = dh0 * perimeter_c / area_c * DS*DS;
+            
+            for(int n = 0; n < IMAX*JMAX; n++){
+                if(bound[n] > 0.0f){
+                    force[n] = force_o;
+                }
+                else if(bound[n] < 0.0f){
+                    force[n] = force_c;
+                }
+                else{
+                    force[n] = 0.0f;
                 }
             }
         
-
         };
 
         /* Solve Poisson's Equation -- Checkerboard Successive Overrelaxation (SOR) Method */
         int poisson(float *grid, const float *force, const float *bound, const float relTol = 1.0e-4f, const float N = 25.0f, const bool gpu_flag = false){
             
+            const float w_SOR = 2.0f/(1.0f+sinf(M_PI/(N+1))); // This is the "optimal" value from Strikwerda, Chapter 13.5
+            
             if(!gpu_flag){
-
-                const float w_SOR = 2.0f/(1.0f+sinf(M_PI/(N+1))); // This is the "optimal" value from Strikwerda, Chapter 13.5
 
                 int iters = 0;
                 const int max_iters = 10000;
@@ -339,8 +416,8 @@ class PoissonControllerNode : public rclcpp::Node{
 
                     // Checkerboard Pass
                     rss = 0.0f;
+                    
                     for(int k = 0; k < TMAX; k++){   
-
                         for(int q = 0; q < QMAX; q++){
                         
                             float *grid_slice = grid + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
@@ -395,7 +472,7 @@ class PoissonControllerNode : public rclcpp::Node{
             }
             else{
 
-                return Kernel::Poisson(grid, force, bound, relTol, N); // CUDA!
+                return Kernel::Poisson(grid, force, bound, relTol, w_SOR); // CUDA!
 
             }
 
@@ -406,13 +483,15 @@ class PoissonControllerNode : public rclcpp::Node{
             
             const bool gpu_flag = true;
 
-            float *bound, *force, *bound_slice_q0;
+            float *bound, *force;
             bound = (float *)malloc(IMAX*JMAX*QMAX*TMAX*sizeof(float));
             force = (float *)malloc(IMAX*JMAX*QMAX*TMAX*sizeof(float));
-            bound_slice_q0 = (float *)malloc(IMAX*JMAX*sizeof(float));
+            
 
+            #pragma omp parallel for
             for(int k=0; k<TMAX; k++){
 
+                float *bound_slice_q0 = (float *)malloc(IMAX*JMAX*sizeof(float));
                 memcpy(bound_slice_q0, occ, IMAX*JMAX*sizeof(float));
                 propogate_occupancy_grid(bound_slice_q0, occ, occ_vi, occ_vj, k);
                 find_boundary(bound_slice_q0);
@@ -422,6 +501,7 @@ class PoissonControllerNode : public rclcpp::Node{
                     const float yaw_k = (float)q * DQ;
                     //const float yaw_k = yaw;
                 
+                    float *force_slice = force + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
                     float *bound_slice = bound + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
                     float *grid_slice = grid + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
                     float *guidance_x_slice = guidance_x + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
@@ -429,45 +509,36 @@ class PoissonControllerNode : public rclcpp::Node{
                     
                     memcpy(bound_slice, bound_slice_q0, IMAX*JMAX*sizeof(float));
                     inflate_occupancy_grid(bound_slice, yaw_k);
-                    find_boundary(bound_slice);
-                    fix_boundary(grid_slice, bound_slice);
-                    compute_boundary_gradients(guidance_x_slice, guidance_y_slice, bound_slice);
+                    find_and_fix_boundary(grid_slice, bound_slice);
+                    //compute_boundary_gradients(guidance_x_slice, guidance_y_slice, bound_slice);
+                    compute_fast_forcing_function(force_slice, bound_slice);
 
                 }
+                
+                free(bound_slice_q0);
 
             }
             
             //const float v_RelTol = 1.0e-4f;
             //vx_iters = poisson(guidance_x, f0, bound, v_RelTol, 25.0f, gpu_flag);
             //vy_iters = poisson(guidance_y, f0, bound, v_RelTol, 25.0f, gpu_flag);
-                
-            for(int k=0; k<TMAX; k++){
-
-                for(int q=0; q<QMAX; q++){
-
-                    float *force_slice = force + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
-                    float *bound_slice = bound + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
-
-                    compute_fast_forcing_function(force_slice, bound_slice);
-
+            //for(int k=0; k<TMAX; k++){
+                //for(int q=0; q<QMAX; q++){
+                    //float *force_slice = force + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
                     //float *guidance_x_slice = guidance_x + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
                     //float *guidance_y_slice = guidance_y + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
                     //compute_optimal_forcing_function(force_slice, guidance_x_slice, guidance_y_slice, bound_slice);
-                    
-                    for(int n=0; n<IMAX*JMAX; n++){
-                        force_slice[n] *= DS*DS;
-                    }
-                    
-                }
-
-            }
+                    //for(int n=0; n<IMAX*JMAX; n++){
+                    //    force_slice[n] *= DS*DS;
+                    //}
+                //}
+            //}
 
             const float h_RelTol = 1.0e-4f;
             h_iters = poisson(grid, force, bound, h_RelTol, 25.0f, gpu_flag);
 
             free(bound);
             free(force);
-            free(bound_slice_q0);
             
         };
 
@@ -508,9 +579,16 @@ class PoissonControllerNode : public rclcpp::Node{
             const float jm = jc - j_eps;
             const float qp = q_wrap(qc + q_eps);
             const float qm = q_wrap(qc - q_eps);
-            dhdx = (trilinear_interpolation(hgrid, ic, jp, qc) - trilinear_interpolation(hgrid, ic, jm, qc)) / (2.0f * x_eps);
-            dhdy = (trilinear_interpolation(hgrid, ip, jc, qc) - trilinear_interpolation(hgrid, im, jc, qc)) / (2.0f * y_eps);
-            dhdyaw = (trilinear_interpolation(hgrid, ic, jc, qp) - trilinear_interpolation(hgrid, ic, jc, qm)) / (2.0f * yaw_eps);
+            const float dhdx0 = (trilinear_interpolation(hgrid0, ic, jp, qc) - trilinear_interpolation(hgrid0, ic, jm, qc)) / (2.0f * x_eps);
+            const float dhdy0 = (trilinear_interpolation(hgrid0, ip, jc, qc) - trilinear_interpolation(hgrid0, im, jc, qc)) / (2.0f * y_eps);
+            const float dhdyaw0 = (trilinear_interpolation(hgrid0, ic, jc, qp) - trilinear_interpolation(hgrid0, ic, jc, qm)) / (2.0f * yaw_eps);
+            const float dhdx1 = (trilinear_interpolation(hgrid1, ic, jp, qc) - trilinear_interpolation(hgrid1, ic, jm, qc)) / (2.0f * x_eps);
+            const float dhdy1 = (trilinear_interpolation(hgrid1, ip, jc, qc) - trilinear_interpolation(hgrid1, im, jc, qc)) / (2.0f * y_eps);
+            const float dhdyaw1 = (trilinear_interpolation(hgrid1, ic, jc, qp) - trilinear_interpolation(hgrid1, ic, jc, qm)) / (2.0f * yaw_eps);
+            const float kgrad = dt/DT;
+            dhdx = dhdx0*(1.0f-kgrad) + dhdx1* kgrad;
+            dhdy = dhdy0*(1.0f-kgrad) + dhdy1* kgrad;
+            dhdyaw = dhdyaw0*(1.0f-kgrad) + dhdyaw1* kgrad;
 
             // Single Integrator Safety Filter
             const float issf = 100.0f;
@@ -546,13 +624,13 @@ class PoissonControllerNode : public rclcpp::Node{
 
                 const float xd[3] = {rxd, ryd, yawd};
                 const float x[3] = {rx, ry, yaw};
-                mpc_controller.update_cost(xd, x);
                 
                 // Perform SQP Iterations
                 const int sqp_iters = 5;
+                mpc_controller.initialize_solution(xd, x);
                 for(int i=0; i<sqp_iters; i++){
-                    mpc_controller.update_constraints(x, hgrid);
-                    mpc_controller.solve();
+                    mpc_controller.update_cost_and_constraints(hgrid);
+                    mpc_fail_flag = mpc_controller.solve();
                 }
                 mpc_age = 0.0f;
             }
@@ -563,6 +641,8 @@ class PoissonControllerNode : public rclcpp::Node{
             for(int i = 0; i < mpc_controller.nZ; i++){
                 mpc_message.data[i] = z[i];
             }
+            mpc_message.data[mpc_controller.nZ+0] = rxd;
+            mpc_message.data[mpc_controller.nZ+1] = ryd;
             this->mpc_publisher_->publish(mpc_message);
 
         }
@@ -590,16 +670,20 @@ class PoissonControllerNode : public rclcpp::Node{
 
             // Solve Poisson Safety Function (New Occupancy, New Orientation)
             solve_poisson_safety_function(hgrid, vxgrid, vygrid, occ, occ_vi, occ_vj);
-            printf("Laplace Iterations: %u \n", vx_iters + vy_iters);
+            //printf("Laplace Iterations: %u \n", vx_iters + vy_iters);
             printf("Poisson Iterations: %u \n", h_iters);
             h_flag = true;
             
-            // Publish Poisson Safety Function Grid
-            int q = ((int)(yaw/DQ) + QMAX) % QMAX;
+            // Publish Poisson Safety Function Grid (Interpolated)
+            const float qr = q_wrap(yaw/DQ);
+            const float q1f = floorf(qr);
+            const float q2f = ceilf(qr);
+            const int q1 = (int)q_wrap(q1f);
+            const int q2 = (int)q_wrap(q2f);
             //int k = TMAX-1;
             int k = 0;
             for(int n = 0; n < IMAX*JMAX; n++){
-                hgrid_message.data[n] = hgrid[k*IMAX*JMAX*QMAX+q*IMAX*JMAX+n];
+                hgrid_message.data[n] = (q2f - qr) * hgrid[k*IMAX*JMAX*QMAX+q1*IMAX*JMAX+n] + (qr - q1f) * hgrid[k*IMAX*JMAX*QMAX+q2*IMAX*JMAX+n];
             }
             this->hgrid_publisher_->publish(hgrid_message);
 
@@ -607,7 +691,7 @@ class PoissonControllerNode : public rclcpp::Node{
             std::cout << "Grid Loop Time: " << dt_grid*1.0e3f << " ms" << std::endl;
             std::cout << "Control Loop Time: " << dt_state*1.0e3f << " ms" << std::endl;
             std::cout << "Command: <" << vx << "," << vy << "," << vyaw << ">" << std::endl;
-            //save_flag = writeDataToFile(save_flag, hgrid, IMAX*JMAX, "poisson_safety_grid.csv");
+            save_flag = writeDataToFile(save_flag, hgrid, IMAX*JMAX, "poisson_safety_grid.csv");
         
         };
 
@@ -617,7 +701,7 @@ class PoissonControllerNode : public rclcpp::Node{
             t_flow = std::chrono::high_resolution_clock::now();
             dt_flow = dt_flow0.count() * 1.0e-9f;
  
-            const float wf = 20.0f;
+            const float wf = 0.0f;
             const float kf = 1.0f - expf(-wf*dt_flow);
 
             // Store Optical Flow Data
@@ -637,7 +721,7 @@ class PoissonControllerNode : public rclcpp::Node{
         void optitrack_state_callback(geometry_msgs::msg::PoseStamped::SharedPtr data){
             
             // Interpret State
-            const float rc[2] = {0.0f, 0.5f}; // Location of OptiTrack Origin in Grid Frame
+            const float rc[2] = {1.75f, 1.75f}; // Location of OptiTrack Origin in Grid Frame
             rx = data->pose.position.x + rc[0];
             ry = data->pose.position.y + rc[1];
             float sin_yaw = 2.0f * (data->pose.orientation.w * data->pose.orientation.z); 
@@ -655,21 +739,33 @@ class PoissonControllerNode : public rclcpp::Node{
 
             // Apply Nominal Control & Safety Filter
             nominal_controller(rx, ry, yaw);
-            if(h_flag) mpc_controller.set_input(&vx, &vy, &vyaw, mpc_age);
-            if(h_flag) safety_filter(rx, ry, yaw, grid_age, false);
+            if(h_flag){
+                if(!mpc_fail_flag){
+                    mpc_controller.set_input(&vx, &vy, &vyaw, mpc_age);
+                }
+                else{
+                    filter_flag = mpc_fail_flag;
+                }
+                safety_filter(rx, ry, yaw, grid_age, filter_flag);
+            }
+            moveG1(&yaw, &vx, &vy, &vyaw);
 
-            // Publish Control Action
-            u_message.data[0] = rx;
-            u_message.data[1] = ry;
-            u_message.data[2] = yaw;
-            u_message.data[3] = vx;
-            u_message.data[4] = vy;
-            u_message.data[5] = vyaw;
-            u_message.data[6] = vxs;
-            u_message.data[7] = vys;
-            u_message.data[8] = vyaws;
-            u_message.data[9] = h;
-            this->u_publisher_->publish(u_message);
+            //Publish Control Action
+            //u_message.data[0] = rx;
+            //u_message.data[1] = ry;
+            //u_message.data[2] = yaw;
+            //u_message.data[3] = vx;
+            //u_message.data[4] = vy;
+            //u_message.data[5] = vyaw;
+            //u_message.data[6] = vxs;
+            //u_message.data[7] = vys;
+            //u_message.data[8] = vyaws;
+            //u_message.data[9] = h;
+            //u_message.data[0] = yaw;
+            //u_message.data[1] = vx;
+            //u_message.data[2] = vy;
+            //u_message.data[3] = vyaw;
+            //this->u_publisher_->publish(u_message);
 
         };
 
@@ -680,6 +776,8 @@ class PoissonControllerNode : public rclcpp::Node{
 
         bool save_flag = false;
         bool h_flag = false;
+        bool filter_flag = false;
+        bool mpc_fail_flag = false;
 
         int vx_iters, vy_iters, h_iters;
         
@@ -725,19 +823,54 @@ class PoissonControllerNode : public rclcpp::Node{
         rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr occ_grid_suber_;
         rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr optflow_suber_;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_suber;
+
+        int g1_socket;
+        struct sockaddr_in dest_addr;
     
 };
 
+struct termios oldt;
+struct termios newt;
+
+void setNonBlocking(bool enable) {
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if(enable) fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+    else fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK);
+}
+
+void setRawMode(bool enable) {
+
+    if(enable){
+        tcgetattr(STDIN_FILENO, &oldt);  // save old settings
+        newt = oldt;
+        newt.c_lflag &= ~(ICANON | ECHO); // disable buffering and echo
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    } 
+    else{
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // restore old settings
+    }
+}
+
 int main(int argc, char * argv[]){
 
-    rclcpp::init(argc, argv);
+    setRawMode(true);
+    setNonBlocking(true);
     
+    rclcpp::init(argc, argv);   
     rclcpp::executors::MultiThreadedExecutor executor;
     rclcpp::Node::SharedPtr poissonNode = std::make_shared<PoissonControllerNode>();
     executor.add_node(poissonNode);
-    executor.spin();
 
-    rclcpp::shutdown();
+    try{
+        executor.spin();
+        throw("Terminated");
+    }
+    catch(const char* msg){
+        rclcpp::shutdown();
+        setRawMode(false);
+        setNonBlocking(false);
+        std::cout << msg << std::endl;
+    }
 
   return 0;
 

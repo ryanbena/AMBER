@@ -2,7 +2,6 @@
 #include <iostream>
 #include <stdio.h>
 #include <poisson.h>
-#include <cuda_fp16.h>
 
 // CUDA Version
 namespace Kernel{
@@ -50,12 +49,11 @@ namespace Kernel{
         float dg = (grid[i+1] + grid[i-1] + grid[i+JMAX] + grid[i-JMAX] - force[i]) / 4.0f - grid[i];
         grid[i] += dg;
         atomicAdd(rss, dg*dg);
-        
         return;
 
     }
 
-    int Poisson(float *h, const float *f, const float *b, const float relTol, const float N){
+    int Poisson(float *h, const float *f, const float *b, const float relTol, const float w_SOR){
 
         // Memory sizes
         size_t grid_size = IMAX * JMAX * QMAX * TMAX * sizeof(float);
@@ -77,14 +75,12 @@ namespace Kernel{
 
         // Launch the kernel
         const int threadsPerBlock = 1024; // CAUTION: THIS CANNOT BE MORE THAN YOUR TENSOR CORE COUNT
-        const int blocksPerGrid = (IMAX * JMAX *QMAX * TMAX + threadsPerBlock - 1) / threadsPerBlock;
+        const int blocksPerGrid = (IMAX * JMAX * QMAX * TMAX + threadsPerBlock - 1) / threadsPerBlock;
 
         int epoch, iter;
         const int max_iters = 1000;
-        const int iter_per_epoch = 25;
+        const int iter_per_epoch = 20;
         int max_epoch = max_iters / iter_per_epoch;
-        
-        const float w_SOR = 2.0f/(1.0f+sinf(M_PI/(N+1))); // This is the "optimal" value from Strikwerda, Chapter 13.5
 
         for(epoch = 1; epoch <= max_epoch; epoch++){
             // Update Cells in Checkerboard Pattern to Enable Parallel SOR
