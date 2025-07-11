@@ -6,6 +6,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(OsqpEigen REQUIRED)
 find_package(osqp REQUIRED)
 find_package(OpenMP REQUIRED)
@@ -27,6 +28,9 @@ set(CMAKE_CUDA_ARCHITECTURES 89)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wno-deprecated-gpu-targets")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G")  # enable cuda-gdb (expensive)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extended-lambda")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math")
+
 
 set(CUDA_SOURCES src/kernel.cu)
 
@@ -37,7 +41,7 @@ set_target_properties(cuda_kernel PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 add_executable(poissonYaw src/main.cpp src/utils.cpp)
 target_link_libraries(poissonYaw Eigen3::Eigen OsqpEigen::OsqpEigen cuda_kernel)
-ament_target_dependencies(poissonYaw rclcpp geometry_msgs std_msgs)
+ament_target_dependencies(poissonYaw rclcpp geometry_msgs std_msgs nav_msgs)
 
 #install(TARGETS
 #  talker

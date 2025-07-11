@@ -18,6 +18,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include "std_msgs/msg/u_int8_multi_array.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
 
 #include <termios.h>
 #include <unistd.h>
@@ -37,18 +38,16 @@ class PoissonControllerNode : public rclcpp::Node{
             
             t_grid = std::chrono::high_resolution_clock::now();
             t_state = std::chrono::high_resolution_clock::now();
-            t_flow = std::chrono::high_resolution_clock::now();
 
             f0 = (float *)malloc(IMAX*JMAX*QMAX*TMAX*sizeof(float));
             hgrid = (float *)malloc(IMAX*JMAX*QMAX*TMAX*sizeof(float));
             vxgrid = (float *)malloc(IMAX*JMAX*QMAX*TMAX*sizeof(float));
             vygrid = (float *)malloc(IMAX*JMAX*QMAX*TMAX*sizeof(float));
             h0grid = (float *)malloc(IMAX*JMAX*QMAX*TMAX*sizeof(float));
+            Kernel::poissonInit();
             
             for(int n = 0; n < IMAX*JMAX; n++){
                 occ[n] = 1.0f;
-                occ_vi_old[n] = 0.0f;
-                occ_vj_old[n] = 0.0f;
                 occ_vi[n] = 0.0f;
                 occ_vj[n] = 0.0f;
             }
@@ -58,11 +57,8 @@ class PoissonControllerNode : public rclcpp::Node{
                 hgrid[n] = h0;
             }
 
-            mpc_controller.setup_QP();
-            mpc_controller.solve();
-
             hgrid_message.data.resize(IMAX*JMAX);
-            u_message.data.resize(4);
+            u_message.data.resize(10);
             mpc_message.data.resize(mpc_controller.nZ+2);
             
             rclcpp::SubscriptionOptions options1;
@@ -72,17 +68,13 @@ class PoissonControllerNode : public rclcpp::Node{
             options2.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
             options3.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
-            rclcpp::QoS qos_profile(5);
-            qos_profile.reliability(rclcpp::ReliabilityPolicy::BestEffort);
-            qos_profile.history(rclcpp::HistoryPolicy::KeepLast);
-
-            hgrid_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("safety_grid_topic", qos_profile);
-            u_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("safety_command_topic", qos_profile);
-            mpc_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("mpc_solution_topic", qos_profile);
-            occ_grid_suber_ = this->create_subscription<std_msgs::msg::UInt8MultiArray>("occ_grid_topic", 1, std::bind(&PoissonControllerNode::occ_grid_callback, this, std::placeholders::_1), options1);
+            hgrid_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("safety_grid_topic", 1);
+            u_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("safety_command_topic", 1);
+            mpc_publisher_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("mpc_solution_topic", 1);
+            occ_grid_suber_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>("occ_grid_topic", 1, std::bind(&PoissonControllerNode::occ_grid_callback, this, std::placeholders::_1), options1);
             optflow_suber_ = this->create_subscription<std_msgs::msg::Float32MultiArray>("optical_flow_topic", 1, std::bind(&PoissonControllerNode::optical_flow_callback, this, std::placeholders::_1), options2);
-            //pose_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/MacLane/pose", 1, std::bind(&PoissonControllerNode::optitrack_state_callback, this, std::placeholders::_1), options3);
-            pose_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/Shakira/pose", 1, std::bind(&PoissonControllerNode::optitrack_state_callback, this, std::placeholders::_1), options3);
+            pose_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/MacLane/pose", 1, std::bind(&PoissonControllerNode::optitrack_state_callback, this, std::placeholders::_1), options3);
+            //pose_suber = this->create_subscription<geometry_msgs::msg::PoseStamped>("/Shakira/pose", 1, std::bind(&PoissonControllerNode::optitrack_state_callback, this, std::placeholders::_1), options3);
 
             // Create Timer for Reference
             const float ref_period = 0.01f;
@@ -90,16 +82,17 @@ class PoissonControllerNode : public rclcpp::Node{
             ref_timer_ = this->create_wall_timer(ref_timer_period, std::bind(&PoissonControllerNode::reference_callback, this));
             
             // Create Timer for MPC
-            const float mpc_period = 0.01f;
-            auto mpc_timer_period = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<float>(mpc_period));
-            mpc_timer_ = this->create_wall_timer(mpc_timer_period, std::bind(&PoissonControllerNode::mpc_callback, this));
-            
-            // Define Reference Trajectory
-            rxd = 1.75f;
-            ryd = 1.75f;
-            yawd = 0.0f;
+            //const float mpc_period = 0.005f;
+            //auto mpc_timer_period = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<float>(mpc_period));
+            //mpc_timer_ = this->create_wall_timer(mpc_timer_period, std::bind(&PoissonControllerNode::mpc_callback, this));
 
-            openG1Socket("169.254.21.27", 5005);
+            const float xd[3] = {rxd, ryd, yawd};
+            const float x[3] = {rx, ry, yaw};
+            mpc_controller.setup_QP(xd,x);
+            mpc_controller.solve();
+            qp_init_flag = true;
+
+            //openG1Socket("169.254.21.27", 5005);
         
         }
 
@@ -161,11 +154,86 @@ class PoissonControllerNode : public rclcpp::Node{
 
         };
 
+        void add_virtual_occupancy(float *occ){
+
+            /*
+            for(int i = 0; i < IMAX; i++){
+                for(int j = 0; j < JMAX; j++){
+                    const int ic = 60;
+                    const int jc = 60;
+                    const float N = 2.0f;
+                    const float dist = powf(powf((float)(i-ic), N) + powf((float)(j-jc), N), 1.0f/N);
+                    if(dist < 40.0f) occ[i*JMAX+j] = -1.0f;
+                }
+            }
+            */
+            /*
+            for(int i = 0; i < IMAX; i++){
+                for(int j = 0; j < JMAX; j++){
+                    const int ic = 30;
+                    const int jc = 90;
+                    const float N = 2.0f;
+                    const float dist = powf(powf((float)(i-ic), N) + powf((float)(j-jc), N), 1.0f/N);
+                    if(dist < 20.0f) occ[i*JMAX+j] = -1.0f;
+                }
+            }
+
+            for(int i = 0; i < IMAX; i++){
+                for(int j = 0; j < JMAX; j++){
+                    const int ic = 90;
+                    const int jc = 30;
+                    const float N = 2.0f;
+                    const float dist = powf(powf((float)(i-ic), N) + powf((float)(j-jc), N), 1.0f/N);
+                    if(dist < 20.0f) occ[i*JMAX+j] = -1.0f;
+                }
+            }
+
+            for(int i = 0; i < IMAX; i++){
+                for(int j = 0; j < JMAX; j++){
+                    const int ic = 90;
+                    const int jc = 90;
+                    const float N = 2.0f;
+                    const float dist = powf(powf((float)(i-ic), N) + powf((float)(j-jc), N), 1.0f/N);
+                    if(dist < 20.0f) occ[i*JMAX+j] = -1.0f;
+                }
+            }
+            */
+
+        };
+
         void propogate_occupancy_grid(float *bound, const float *occ, const float *occ_vi, const float *occ_vj, const int k){
             
             for(int n = 0; n < IMAX*JMAX; n++){
                 bound[n] = 1.0f;
             }
+
+            /*
+            int count = 0;
+            float vi = 0.0f;
+            float vj = 0.0f;
+            for(int i = 0; i < IMAX; i++){
+                for(int j = 0; j < JMAX; j++){
+                    if(occ[i*JMAX+j]==-1.0f){
+                        count++;
+                        vi += occ_vi[i*JMAX+j];
+                        vj += occ_vj[i*JMAX+j];
+                    }
+                }
+            }
+            vi /= (float)count;
+            vj /= (float)count;
+            for(int i = 0; i < IMAX; i++){
+                for(int j = 0; j < JMAX; j++){
+                    if(occ[i*JMAX+j]==-1.0f){
+                        const float if_new = (float)i + vi * (float)k * DT;
+                        const float jf_new = (float)j + vj * (float)k * DT;
+                        const int i_new = std::min(std::max((int)roundf(if_new), 0), IMAX-1);
+                        const int j_new = std::min(std::max((int)roundf(jf_new), 0), JMAX-1);
+                        bound[i_new*JMAX+j_new] = -1.0f;
+                    }
+                }
+            }
+            */
             
             for(int i = 0; i < IMAX; i++){
                 for(int j = 0; j < JMAX; j++){
@@ -178,6 +246,7 @@ class PoissonControllerNode : public rclcpp::Node{
                     }
                 }
             }
+            
         
         };
 
@@ -240,32 +309,31 @@ class PoissonControllerNode : public rclcpp::Node{
         void inflate_occupancy_grid(float *bound, const float yawk){
 
             /* Step 1: Create Robot Kernel */
-            //const float length = 0.76f; // Go2
-            //const float width = 0.35f;
-            const float length = 0.35f; // G1
-            const float width = 1.02f;
+            const float length = 0.76f; // Go2
+            const float width = 0.35f;
+            //const float length = 0.35f; // G1
+            //const float width = 1.02f;
             //const float length = 0.40f; // Drone
             //const float width = 0.40f;
             
-            const float D = sqrtf(length*length + width*width); // Max Robot Dimension to Define Kernel Size
-            const int dim = ceilf((ceilf(D / DS) + 1.0f) / 2.0f) * 2.0f - 1.0f;
-            float robot_grid[dim*dim];
-
-            const float MOS = 1.4f;
+            const float MOS = 1.2f;
             const float ar = MOS * length / 2.0f;
             const float br = MOS * width / 2.0f;
 
-            const float expo = 4.0f;
+            const float D = 2.0f * sqrtf(ar*ar + br*br); // Max Robot Dimension to Define Kernel Size
+            const int dim = ceilf(ceilf(D / DS) / 2.0f) * 2.0f; //Make Sure Kernel Dimension is Even
+            float robot_grid[dim*dim];
+
+            const float expo = 2.0f;
             for(int i = 0; i < dim; i++){
-                const float yi = (float)(dim-1-i)*DS - D/2.0f;
+                const float yi = (float)(i-dim/2)*DS;
                 for(int j = 0; j < dim; j++){
                     robot_grid[i*dim+j] = 0.0;
-                    const float xi = (float)j*DS - D/2.0f;
+                    const float xi = (float)(j-dim/2)*DS;
                     const float xb = cosf(yawk)*xi + sinf(yawk)*yi;
                     const float yb = -sinf(yawk)*xi + cosf(yawk)*yi;
                     const float dist = powf(fabsf(xb/ar), expo) + powf(fabsf(yb/br), expo);
                     if(dist <= 1.0f) robot_grid[i*dim+j] = -1.0f;
-                    //if(fabsf(xb/ar) <= 1.0f && fabsf(yb/br) <= 1.0f) robot_grid[i*dim+j] = -1.0f;
                 }
             }
         
@@ -472,7 +540,7 @@ class PoissonControllerNode : public rclcpp::Node{
             }
             else{
 
-                return Kernel::Poisson(grid, force, bound, relTol, w_SOR); // CUDA!
+                return Kernel::poissonSolve(grid, force, bound, relTol, w_SOR); // CUDA!
 
             }
 
@@ -499,8 +567,6 @@ class PoissonControllerNode : public rclcpp::Node{
                 for(int q=0; q<QMAX; q++){
                 
                     const float yaw_k = (float)q * DQ;
-                    //const float yaw_k = yaw;
-                
                     float *force_slice = force + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
                     float *bound_slice = bound + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
                     float *grid_slice = grid + k*IMAX*JMAX*QMAX + q*IMAX*JMAX;
@@ -545,20 +611,13 @@ class PoissonControllerNode : public rclcpp::Node{
         void safety_filter(const float rx, const float ry, const float yaw, const float dt, const bool filter_flag){
 
             // Fractional Index Corresponding to Current Position
-            const float ir = (float)(IMAX-1) - ry / DS;
+            const float ir = ry / DS;
             const float jr = rx / DS;
             const float qr = yaw / DQ;
 
-            const float x_eps = 1.0f*DS; // Small Perturbation for Numerical Gradients (meters)
-            const float y_eps = 1.0f*DS; // Small Perturbation for Numerical Gradients (meters)
-            const float yaw_eps = 1.0f*DQ;
-
-            const float i_eps = x_eps / DS;
-            const float j_eps = y_eps / DS;
-            const float q_eps = yaw_eps / DQ;
-
-            const float ic = fminf(fmaxf(i_eps, ir), (float)(IMAX-1)-i_eps); // Saturated Because of Finite Grid Size
-            const float jc = fminf(fmaxf(j_eps, jr), (float)(JMAX-1)-j_eps); // Numerical Derivatives Shrink Effective Grid Size
+            // Saturated Because of Finite Grid Size
+            const float ic = fminf(fmaxf(0.0f, ir), (float)(IMAX-1)); // Saturated Because of Finite Grid Size
+            const float jc = fminf(fmaxf(0.0f, jr), (float)(JMAX-1)); // Numerical Derivatives Shrink Effective Grid Size
             const float qc = q_wrap(qr);
 
             // Get Safety Function Rate
@@ -571,20 +630,35 @@ class PoissonControllerNode : public rclcpp::Node{
             // Get Safety Function Value
             h = h0;
             h += dhdt * dt;
-            
+                        
+            // If You Have Left The Grid, Use SDF to Get Back
+            //if((ic!=ir) && (jc!=jr)){
+            //    h -= sqrtf((ir-ic)*(ir-ic) + (jr-jc)*(jr-jc)) * DS;
+            //}
+            //else if(ic!=ir){
+            //    h -= fabsf(ir-ic) * DS;
+            //}
+            //else if(jc!=jr){
+            //    h -= fabsf(jr-jc) * DS;
+            //}
+
             // Compute Gradients
-            const float ip = ic - i_eps;
-            const float im = ic + i_eps;
-            const float jp = jc + j_eps;
-            const float jm = jc - j_eps;
+            const float i_eps = 5.0f;
+            const float j_eps = 5.0f;
+            const float q_eps = 1.0f;
+            const float ip = fminf(fmaxf(0.0f, ic + i_eps), (float)(IMAX-1));
+            const float im = fminf(fmaxf(0.0f, ic - i_eps), (float)(IMAX-1));
+            const float jp = fminf(fmaxf(0.0f, jc + j_eps), (float)(JMAX-1));
+            const float jm = fminf(fmaxf(0.0f, jc - j_eps), (float)(JMAX-1));
             const float qp = q_wrap(qc + q_eps);
             const float qm = q_wrap(qc - q_eps);
-            const float dhdx0 = (trilinear_interpolation(hgrid0, ic, jp, qc) - trilinear_interpolation(hgrid0, ic, jm, qc)) / (2.0f * x_eps);
-            const float dhdy0 = (trilinear_interpolation(hgrid0, ip, jc, qc) - trilinear_interpolation(hgrid0, im, jc, qc)) / (2.0f * y_eps);
-            const float dhdyaw0 = (trilinear_interpolation(hgrid0, ic, jc, qp) - trilinear_interpolation(hgrid0, ic, jc, qm)) / (2.0f * yaw_eps);
-            const float dhdx1 = (trilinear_interpolation(hgrid1, ic, jp, qc) - trilinear_interpolation(hgrid1, ic, jm, qc)) / (2.0f * x_eps);
-            const float dhdy1 = (trilinear_interpolation(hgrid1, ip, jc, qc) - trilinear_interpolation(hgrid1, im, jc, qc)) / (2.0f * y_eps);
-            const float dhdyaw1 = (trilinear_interpolation(hgrid1, ic, jc, qp) - trilinear_interpolation(hgrid1, ic, jc, qm)) / (2.0f * yaw_eps);
+
+            const float dhdx0 = (trilinear_interpolation(hgrid0, ic, jp, qc) - trilinear_interpolation(hgrid0, ic, jm, qc)) / ((jp-jm)*DS);
+            const float dhdy0 = (trilinear_interpolation(hgrid0, ip, jc, qc) - trilinear_interpolation(hgrid0, im, jc, qc)) / ((ip-im)*DS);
+            const float dhdyaw0 = (trilinear_interpolation(hgrid0, ic, jc, qp) - trilinear_interpolation(hgrid0, ic, jc, qm)) / (2.0f*q_eps*DQ);
+            const float dhdx1 = (trilinear_interpolation(hgrid1, ic, jp, qc) - trilinear_interpolation(hgrid1, ic, jm, qc)) / ((jp-jm)*DS);
+            const float dhdy1 = (trilinear_interpolation(hgrid1, ip, jc, qc) - trilinear_interpolation(hgrid1, im, jc, qc)) / ((ip-im)*DS);
+            const float dhdyaw1 = (trilinear_interpolation(hgrid1, ic, jc, qp) - trilinear_interpolation(hgrid1, ic, jc, qm)) / (2.0f*q_eps*DQ);
             const float kgrad = dt/DT;
             dhdx = dhdx0*(1.0f-kgrad) + dhdx1* kgrad;
             dhdy = dhdy0*(1.0f-kgrad) + dhdy1* kgrad;
@@ -620,7 +694,7 @@ class PoissonControllerNode : public rclcpp::Node{
 
         void mpc_callback(void){
             
-            if(h_flag){
+            if(h_flag && qp_init_flag){
 
                 const float xd[3] = {rxd, ryd, yawd};
                 const float x[3] = {rx, ry, yaw};
@@ -647,7 +721,7 @@ class PoissonControllerNode : public rclcpp::Node{
 
         }
 
-        void occ_grid_callback(std_msgs::msg::UInt8MultiArray::UniquePtr msg){
+        void occ_grid_callback(nav_msgs::msg::OccupancyGrid::UniquePtr msg){
             
             // Start Solve Timer
             Timer solve_timer(true);
@@ -664,6 +738,7 @@ class PoissonControllerNode : public rclcpp::Node{
                 occ[n] = 1.0f;
                 if(msg->data[n]) occ[n] = -1.0f;
             }
+            //add_virtual_occupancy(occ);
 
             // Store Old Solution
             memcpy(h0grid, hgrid, IMAX*JMAX*QMAX*TMAX*sizeof(float));
@@ -683,7 +758,8 @@ class PoissonControllerNode : public rclcpp::Node{
             //int k = TMAX-1;
             int k = 0;
             for(int n = 0; n < IMAX*JMAX; n++){
-                hgrid_message.data[n] = (q2f - qr) * hgrid[k*IMAX*JMAX*QMAX+q1*IMAX*JMAX+n] + (qr - q1f) * hgrid[k*IMAX*JMAX*QMAX+q2*IMAX*JMAX+n];
+                if(q1f!=q2f) hgrid_message.data[n] = (q2f - qr) * hgrid[k*IMAX*JMAX*QMAX+q1*IMAX*JMAX+n] + (qr - q1f) * hgrid[k*IMAX*JMAX*QMAX+q2*IMAX*JMAX+n];
+                else hgrid_message.data[n] = hgrid[k*IMAX*JMAX*QMAX+q1*IMAX*JMAX+n];
             }
             this->hgrid_publisher_->publish(hgrid_message);
 
@@ -691,35 +767,22 @@ class PoissonControllerNode : public rclcpp::Node{
             std::cout << "Grid Loop Time: " << dt_grid*1.0e3f << " ms" << std::endl;
             std::cout << "Control Loop Time: " << dt_state*1.0e3f << " ms" << std::endl;
             std::cout << "Command: <" << vx << "," << vy << "," << vyaw << ">" << std::endl;
-            save_flag = writeDataToFile(save_flag, hgrid, IMAX*JMAX, "poisson_safety_grid.csv");
+            //save_flag = writeDataToFile(save_flag, hgrid, IMAX*JMAX, "poisson_safety_grid.csv");
         
         };
 
-        void optical_flow_callback(std_msgs::msg::Float32MultiArray::UniquePtr msg){
-            
-            dt_flow0 = std::chrono::high_resolution_clock::now() - t_flow;
-            t_flow = std::chrono::high_resolution_clock::now();
-            dt_flow = dt_flow0.count() * 1.0e-9f;
- 
-            const float wf = 0.0f;
-            const float kf = 1.0f - expf(-wf*dt_flow);
-
-            // Store Optical Flow Data
-            for(int n = 0; n < IMAX*JMAX; n++){
-                occ_vi_old[n] *= 1.0f - kf;
-                occ_vj_old[n] *= 1.0f - kf;
-                occ_vi_old[n] += kf * msg->data[0*IMAX*JMAX+n] / dt_flow;
-                occ_vj_old[n] += kf * msg->data[1*IMAX*JMAX+n] / dt_flow;
-                occ_vi[n] *= 1.0f - kf;
-                occ_vj[n] *= 1.0f - kf;
-                occ_vi[n] += kf * occ_vi_old[n];
-                occ_vj[n] += kf * occ_vj_old[n];
-            }
-        
+        /* Store Optical Flow Data */
+        void optical_flow_callback(const std_msgs::msg::Float32MultiArray::UniquePtr msg){
+          
+          for(int n = 0; n < IMAX*JMAX; n++){
+              occ_vi[n] = msg->data[0*IMAX*JMAX+n];
+              occ_vj[n] = msg->data[1*IMAX*JMAX+n];
+          }
+      
         };
 
         void optitrack_state_callback(geometry_msgs::msg::PoseStamped::SharedPtr data){
-            
+
             // Interpret State
             const float rc[2] = {1.75f, 1.75f}; // Location of OptiTrack Origin in Grid Frame
             rx = data->pose.position.x + rc[0];
@@ -739,38 +802,49 @@ class PoissonControllerNode : public rclcpp::Node{
 
             // Apply Nominal Control & Safety Filter
             nominal_controller(rx, ry, yaw);
+            mpc_callback();
             if(h_flag){
-                if(!mpc_fail_flag){
+                if(qp_init_flag){
                     mpc_controller.set_input(&vx, &vy, &vyaw, mpc_age);
                 }
                 else{
-                    filter_flag = mpc_fail_flag;
+                    filter_flag = !qp_init_flag;
                 }
                 safety_filter(rx, ry, yaw, grid_age, filter_flag);
             }
-            moveG1(&yaw, &vx, &vy, &vyaw);
+            
+            //moveG1(&yaw, &vx, &vy, &vyaw);
+
+            // Check for Valid Control Action
+            bool valid_flag = true;
+            if(fabsf(vx)>100.0f || fabsf(vy)>100.0f || fabsf(vyaw)>100.0f) valid_flag = false;
 
             //Publish Control Action
-            //u_message.data[0] = rx;
-            //u_message.data[1] = ry;
-            //u_message.data[2] = yaw;
-            //u_message.data[3] = vx;
-            //u_message.data[4] = vy;
-            //u_message.data[5] = vyaw;
-            //u_message.data[6] = vxs;
-            //u_message.data[7] = vys;
-            //u_message.data[8] = vyaws;
-            //u_message.data[9] = h;
-            //u_message.data[0] = yaw;
-            //u_message.data[1] = vx;
-            //u_message.data[2] = vy;
-            //u_message.data[3] = vyaw;
-            //this->u_publisher_->publish(u_message);
+            if(valid_flag){
+                u_message.data[0] = rx;
+                u_message.data[1] = ry;
+                u_message.data[2] = yaw;
+                u_message.data[3] = vx;
+                u_message.data[4] = vy;
+                u_message.data[5] = vyaw;
+                u_message.data[6] = vxs;
+                u_message.data[7] = vys;
+                u_message.data[8] = vyaws;
+                u_message.data[9] = h;
+                this->u_publisher_->publish(u_message);
+            }
+            else{
+                qp_init_flag = false;
+                const float xd[3] = {rxd, ryd, yawd};
+                const float x[3] = {rx, ry, yaw};
+                mpc_controller.reset_QP(xd, x);
+                qp_init_flag = true;
+            }
 
         };
-
-        MPC mpc_controller;
         
+        MPC mpc_controller;
+
         const float h0 = 0.0f; // Set boundary level set value
         const float dh0 = 1.0f; // Set dh Value
 
@@ -778,6 +852,7 @@ class PoissonControllerNode : public rclcpp::Node{
         bool h_flag = false;
         bool filter_flag = false;
         bool mpc_fail_flag = false;
+        bool qp_init_flag = false;
 
         int vx_iters, vy_iters, h_iters;
         
@@ -785,16 +860,19 @@ class PoissonControllerNode : public rclcpp::Node{
         float ry = 1.75f;
         float yaw = 0.0f;
 
+        // Define Reference Trajectory
+        float rxd = 1.75f;
+        float ryd = 1.75f;
+        float yawd = 0.0f;//-1.57f;
+
         //float t = -5.0f;
-        std::chrono::high_resolution_clock::time_point t_grid, t_state, t_flow;
-        std::chrono::duration<float, std::nano> dt_grid0, dt_state0, dt_flow0;
+        std::chrono::high_resolution_clock::time_point t_grid, t_state;
+        std::chrono::duration<float, std::nano> dt_grid0, dt_state0;
         float dt_grid = 1.0e10f;
         float dt_state = 1.0e10f;
-        float dt_flow = 1.0e10f;
         float grid_age = 0.0f;
         float mpc_age = 0.0f;
 
-        float rxd, ryd, yawd;
         float vx, vy, vyaw;
         float vxs, vys, vyaws;
         float h, dhdt, dhdyaw, dhdx, dhdy;
@@ -807,8 +885,6 @@ class PoissonControllerNode : public rclcpp::Node{
         float occ[IMAX*JMAX];
         float occ_vi[IMAX*JMAX];
         float occ_vj[IMAX*JMAX];
-        float occ_vi_old[IMAX*JMAX];
-        float occ_vj_old[IMAX*JMAX];
         float *f0, *hgrid, *vxgrid, *vygrid, *h0grid;
         
         std_msgs::msg::Float32MultiArray hgrid_message;
@@ -820,7 +896,7 @@ class PoissonControllerNode : public rclcpp::Node{
         rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr hgrid_publisher_;
         rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr u_publisher_;
         rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr mpc_publisher_;
-        rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr occ_grid_suber_;
+        rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occ_grid_suber_;
         rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr optflow_suber_;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_suber;
 

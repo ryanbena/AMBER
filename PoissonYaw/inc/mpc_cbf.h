@@ -35,7 +35,7 @@ class MPC{
             Px.setIdentity(LINEAR_STATE_LENGTH, LINEAR_STATE_LENGTH);
             Px.row(0) << 5.0, 0.0, 0.0;
             Px.row(1) << 0.0, 5.0, 0.0;
-            Px.row(2) << 0.0, 0.0, 0.1;
+            Px.row(2) << 0.0, 0.0, 0.5;
 
             Pu.setIdentity(LINEAR_INPUT_LENGTH, LINEAR_INPUT_LENGTH); 
             Pu.row(0) << 5.0, 0.0, 0.0;
@@ -74,12 +74,23 @@ class MPC{
 
         OsqpEigen::Solver solver;
 
-        int setup_QP(){
+        int setup_QP(const float *xd, const float *x){
             
             solver.settings()->setVerbosity(false); // Turn off printing
             solver.settings()->setMaxIteration(100);
             solver.data()->setNumberOfVariables(nZ); 
             solver.data()->setNumberOfConstraints(nC);
+
+            state_goal << xd[0], xd[1], xd[2];
+            state_curr << x[0], x[1], x[2];
+    
+            while((state_goal(2)-state_curr(2)) < -M_PI) state_goal(2) += 2.0f*M_PI;
+            while((state_goal(2)-state_curr(2)) >= M_PI) state_goal(2) -= 2.0f*M_PI;
+
+            for (int i=0; i<=N_HORIZON; i++){
+                sol.segment(i*LINEAR_STATE_LENGTH, LINEAR_STATE_LENGTH) += state_goal * (float)i / (float)N_HORIZON; 
+                sol.segment(i*LINEAR_STATE_LENGTH, LINEAR_STATE_LENGTH) += state_curr * (float)(N_HORIZON-i) / (float)N_HORIZON;
+            }
             
             Eigen::SparseMatrix<double> cost_P_sparse = cost_P.sparseView();
             Eigen::SparseMatrix<double> constraint_A_sparse = constraint_A.sparseView();
@@ -90,6 +101,19 @@ class MPC{
             if(!solver.data()->setLowerBound(constraint_lower)) return 1; 
             if(!solver.data()->setUpperBound(constraint_upper)) return 1; 
             if (!solver.initSolver()) return 1; 
+            return 0;
+
+        }
+
+        int reset_QP(const float *xd, const float *x){
+            
+            solver.data()->clearHessianMatrix();
+            solver.data()->clearLinearConstraintsMatrix();
+            solver.clearSolverVariables();
+            solver.clearSolver();
+
+            setup_QP(xd, x);
+            solve();
             return 0;
 
         }
@@ -121,13 +145,9 @@ class MPC{
             constraint_upper.segment(0, LINEAR_STATE_LENGTH) = state_curr;
 
             // Update Obstacle State Constraints
-            const float x_eps = 5.0f*DS; // Small Perturbation for Numerical Gradients (meters)
-            const float y_eps = 5.0f*DS; // Small Perturbation for Numerical Gradients (meters)
-            const float yaw_eps = 1.0f*DQ;
-
-            const float i_eps = x_eps / DS;
-            const float j_eps = y_eps / DS;
-            const float q_eps = yaw_eps / DQ;
+            const float i_eps = 5.0f;
+            const float j_eps = 5.0f;
+            const float q_eps = 1.0f;
 
             for(int k=0; k<=N_HORIZON; k++){
                 
@@ -139,58 +159,72 @@ class MPC{
                 const float *hgridk = hgrid + k*IMAX*JMAX*QMAX;
 
                 // Indices Corresponding to Current Position
-                const float ir = (float)(IMAX-1) - yk / DS;
+                const float ir = yk / DS;
                 const float jr = xk / DS;
                 const float qr = yawk / DQ;
-        
-                const float ic = fminf(fmaxf(i_eps, ir), (float)(IMAX-1)-i_eps); // Saturated Because of Finite Grid Size
-                const float jc = fminf(fmaxf(j_eps, jr), (float)(JMAX-1)-j_eps); // Numerical Gradients Shrink Effective Grid Size
+
+                // Saturated Because of Finite Grid Size
+                const float ic = fminf(fmaxf(0.0f, ir), (float)(IMAX-1)); // Saturated Because of Finite Grid Size
+                const float jc = fminf(fmaxf(0.0f, jr), (float)(JMAX-1)); // Numerical Derivatives Shrink Effective Grid Size
                 const float qc = q_wrap(qr);
 
-                const float ip = ic - i_eps;
-                const float im = ic + i_eps;
-                const float jp = jc + j_eps;
-                const float jm = jc - j_eps;
+                // Get Safety Function Values
+                float h = trilinear_interpolation(hgridk, ic, jc, qc);
+                
+                // If You Have Left The Grid, Use SDF to Get Back
+                //if((ic!=ir) && (jc!=jr)){
+                //    h -= sqrtf((ir-ic)*(ir-ic) + (jr-jc)*(jr-jc)) * DS;
+                //}
+                //else if(ic!=ir){
+                //    h -= fabsf(ir-ic) * DS;
+                //}
+                //else if(jc!=jr){
+                //    h -= fabsf(jr-jc) * DS;
+                //}
+
+                // Compute Gradients
+                const float ip = fminf(fmaxf(0.0f, ic + i_eps), (float)(IMAX-1));
+                const float im = fminf(fmaxf(0.0f, ic - i_eps), (float)(IMAX-1));
+                const float jp = fminf(fmaxf(0.0f, jc + j_eps), (float)(JMAX-1));
+                const float jm = fminf(fmaxf(0.0f, jc - j_eps), (float)(JMAX-1));
                 const float qp = q_wrap(qc + q_eps);
                 const float qm = q_wrap(qc - q_eps);
 
-                // Get Safety Function Values
-                const float h = trilinear_interpolation(hgridk, ic, jc, qc);
                 //const float dhdx = (trilinear_interpolation(hgridk, ic, jp, qc) - trilinear_interpolation(hgridk, ic, jm, qc)) / (2.0f * x_eps);
                 //const float dhdy = (trilinear_interpolation(hgridk, ip, jc, qc) - trilinear_interpolation(hgridk, im, jc, qc)) / (2.0f * y_eps);
                 //const float dhdyaw = (trilinear_interpolation(hgridk, ic, jc, qp) - trilinear_interpolation(hgridk, ic, jc, qm)) / (2.0f * yaw_eps);
 
-                const float dhdxpp = (trilinear_interpolation(hgridk, ip, jp, qp) - trilinear_interpolation(hgridk, ip, jm, qp)) / (2.0f * x_eps);
-                const float dhdxcp = (trilinear_interpolation(hgridk, ic, jp, qp) - trilinear_interpolation(hgridk, ic, jm, qp)) / (2.0f * x_eps);
-                const float dhdxmp = (trilinear_interpolation(hgridk, im, jp, qp) - trilinear_interpolation(hgridk, im, jm, qp)) / (2.0f * x_eps);
-                const float dhdxpc = (trilinear_interpolation(hgridk, ip, jp, qc) - trilinear_interpolation(hgridk, ip, jm, qc)) / (2.0f * x_eps);
-                const float dhdxcc = (trilinear_interpolation(hgridk, ic, jp, qc) - trilinear_interpolation(hgridk, ic, jm, qc)) / (2.0f * x_eps);
-                const float dhdxmc = (trilinear_interpolation(hgridk, im, jp, qc) - trilinear_interpolation(hgridk, im, jm, qc)) / (2.0f * x_eps);
-                const float dhdxpm = (trilinear_interpolation(hgridk, ip, jp, qm) - trilinear_interpolation(hgridk, ip, jm, qm)) / (2.0f * x_eps);
-                const float dhdxcm = (trilinear_interpolation(hgridk, ic, jp, qm) - trilinear_interpolation(hgridk, ic, jm, qm)) / (2.0f * x_eps);
-                const float dhdxmm = (trilinear_interpolation(hgridk, im, jp, qm) - trilinear_interpolation(hgridk, im, jm, qm)) / (2.0f * x_eps);
+                const float dhdxpp = (trilinear_interpolation(hgridk, ip, jp, qp) - trilinear_interpolation(hgridk, ip, jm, qp)) / ((jp-jm)*DS);
+                const float dhdxcp = (trilinear_interpolation(hgridk, ic, jp, qp) - trilinear_interpolation(hgridk, ic, jm, qp)) / ((jp-jm)*DS);
+                const float dhdxmp = (trilinear_interpolation(hgridk, im, jp, qp) - trilinear_interpolation(hgridk, im, jm, qp)) / ((jp-jm)*DS);
+                const float dhdxpc = (trilinear_interpolation(hgridk, ip, jp, qc) - trilinear_interpolation(hgridk, ip, jm, qc)) / ((jp-jm)*DS);
+                const float dhdxcc = (trilinear_interpolation(hgridk, ic, jp, qc) - trilinear_interpolation(hgridk, ic, jm, qc)) / ((jp-jm)*DS);
+                const float dhdxmc = (trilinear_interpolation(hgridk, im, jp, qc) - trilinear_interpolation(hgridk, im, jm, qc)) / ((jp-jm)*DS);
+                const float dhdxpm = (trilinear_interpolation(hgridk, ip, jp, qm) - trilinear_interpolation(hgridk, ip, jm, qm)) / ((jp-jm)*DS);
+                const float dhdxcm = (trilinear_interpolation(hgridk, ic, jp, qm) - trilinear_interpolation(hgridk, ic, jm, qm)) / ((jp-jm)*DS);
+                const float dhdxmm = (trilinear_interpolation(hgridk, im, jp, qm) - trilinear_interpolation(hgridk, im, jm, qm)) / ((jp-jm)*DS);
                 const float dhdx = (dhdxpp + dhdxcp + dhdxmp + dhdxpc + dhdxcc + dhdxmc + dhdxpm + dhdxcm + dhdxmm) / 9.0f;
 
-                const float dhdypp = (trilinear_interpolation(hgridk, ip, jp, qp) - trilinear_interpolation(hgridk, im, jp, qp)) / (2.0f * y_eps);
-                const float dhdycp = (trilinear_interpolation(hgridk, ip, jc, qp) - trilinear_interpolation(hgridk, im, jc, qp)) / (2.0f * y_eps);
-                const float dhdymp = (trilinear_interpolation(hgridk, ip, jm, qp) - trilinear_interpolation(hgridk, im, jm, qp)) / (2.0f * y_eps);
-                const float dhdypc = (trilinear_interpolation(hgridk, ip, jp, qc) - trilinear_interpolation(hgridk, im, jp, qc)) / (2.0f * y_eps);
-                const float dhdycc = (trilinear_interpolation(hgridk, ip, jc, qc) - trilinear_interpolation(hgridk, im, jc, qc)) / (2.0f * y_eps);
-                const float dhdymc = (trilinear_interpolation(hgridk, ip, jm, qc) - trilinear_interpolation(hgridk, im, jm, qc)) / (2.0f * y_eps);
-                const float dhdypm = (trilinear_interpolation(hgridk, ip, jp, qm) - trilinear_interpolation(hgridk, im, jp, qm)) / (2.0f * y_eps);
-                const float dhdycm = (trilinear_interpolation(hgridk, ip, jc, qm) - trilinear_interpolation(hgridk, im, jc, qm)) / (2.0f * y_eps);
-                const float dhdymm = (trilinear_interpolation(hgridk, ip, jm, qm) - trilinear_interpolation(hgridk, im, jm, qm)) / (2.0f * y_eps);
+                const float dhdypp = (trilinear_interpolation(hgridk, ip, jp, qp) - trilinear_interpolation(hgridk, im, jp, qp)) / ((ip-im)*DS);
+                const float dhdycp = (trilinear_interpolation(hgridk, ip, jc, qp) - trilinear_interpolation(hgridk, im, jc, qp)) / ((ip-im)*DS);
+                const float dhdymp = (trilinear_interpolation(hgridk, ip, jm, qp) - trilinear_interpolation(hgridk, im, jm, qp)) / ((ip-im)*DS);
+                const float dhdypc = (trilinear_interpolation(hgridk, ip, jp, qc) - trilinear_interpolation(hgridk, im, jp, qc)) / ((ip-im)*DS);
+                const float dhdycc = (trilinear_interpolation(hgridk, ip, jc, qc) - trilinear_interpolation(hgridk, im, jc, qc)) / ((ip-im)*DS);
+                const float dhdymc = (trilinear_interpolation(hgridk, ip, jm, qc) - trilinear_interpolation(hgridk, im, jm, qc)) / ((ip-im)*DS);
+                const float dhdypm = (trilinear_interpolation(hgridk, ip, jp, qm) - trilinear_interpolation(hgridk, im, jp, qm)) / ((ip-im)*DS);
+                const float dhdycm = (trilinear_interpolation(hgridk, ip, jc, qm) - trilinear_interpolation(hgridk, im, jc, qm)) / ((ip-im)*DS);
+                const float dhdymm = (trilinear_interpolation(hgridk, ip, jm, qm) - trilinear_interpolation(hgridk, im, jm, qm)) / ((ip-im)*DS);
                 const float dhdy = (dhdypp + dhdycp + dhdymp + dhdypc + dhdycc + dhdymc + dhdypm + dhdycm + dhdymm) / 9.0f;
 
-                const float dhdyawpp = (trilinear_interpolation(hgridk, ip, jp, qp) - trilinear_interpolation(hgridk, ip, jp, qm)) / (2.0f * yaw_eps);
-                const float dhdyawcp = (trilinear_interpolation(hgridk, ic, jp, qp) - trilinear_interpolation(hgridk, ic, jp, qm)) / (2.0f * yaw_eps);
-                const float dhdyawmp = (trilinear_interpolation(hgridk, im, jp, qp) - trilinear_interpolation(hgridk, im, jp, qm)) / (2.0f * yaw_eps);
-                const float dhdyawpc = (trilinear_interpolation(hgridk, ip, jc, qp) - trilinear_interpolation(hgridk, ip, jc, qm)) / (2.0f * yaw_eps);
-                const float dhdyawcc = (trilinear_interpolation(hgridk, ic, jc, qp) - trilinear_interpolation(hgridk, ic, jc, qm)) / (2.0f * yaw_eps);
-                const float dhdyawmc = (trilinear_interpolation(hgridk, im, jc, qp) - trilinear_interpolation(hgridk, im, jc, qm)) / (2.0f * yaw_eps);
-                const float dhdyawpm = (trilinear_interpolation(hgridk, ip, jm, qp) - trilinear_interpolation(hgridk, ip, jm, qm)) / (2.0f * yaw_eps);
-                const float dhdyawcm = (trilinear_interpolation(hgridk, ic, jm, qp) - trilinear_interpolation(hgridk, ic, jm, qm)) / (2.0f * yaw_eps);
-                const float dhdyawmm = (trilinear_interpolation(hgridk, im, jm, qp) - trilinear_interpolation(hgridk, im, jm, qm)) / (2.0f * yaw_eps);
+                const float dhdyawpp = (trilinear_interpolation(hgridk, ip, jp, qp) - trilinear_interpolation(hgridk, ip, jp, qm)) / (2.0f*q_eps*DQ);
+                const float dhdyawcp = (trilinear_interpolation(hgridk, ic, jp, qp) - trilinear_interpolation(hgridk, ic, jp, qm)) / (2.0f*q_eps*DQ);
+                const float dhdyawmp = (trilinear_interpolation(hgridk, im, jp, qp) - trilinear_interpolation(hgridk, im, jp, qm)) / (2.0f*q_eps*DQ);
+                const float dhdyawpc = (trilinear_interpolation(hgridk, ip, jc, qp) - trilinear_interpolation(hgridk, ip, jc, qm)) / (2.0f*q_eps*DQ);
+                const float dhdyawcc = (trilinear_interpolation(hgridk, ic, jc, qp) - trilinear_interpolation(hgridk, ic, jc, qm)) / (2.0f*q_eps*DQ);
+                const float dhdyawmc = (trilinear_interpolation(hgridk, im, jc, qp) - trilinear_interpolation(hgridk, im, jc, qm)) / (2.0f*q_eps*DQ);
+                const float dhdyawpm = (trilinear_interpolation(hgridk, ip, jm, qp) - trilinear_interpolation(hgridk, ip, jm, qm)) / (2.0f*q_eps*DQ);
+                const float dhdyawcm = (trilinear_interpolation(hgridk, ic, jm, qp) - trilinear_interpolation(hgridk, ic, jm, qm)) / (2.0f*q_eps*DQ);
+                const float dhdyawmm = (trilinear_interpolation(hgridk, im, jm, qp) - trilinear_interpolation(hgridk, im, jm, qm)) / (2.0f*q_eps*DQ);
                 const float dhdyaw = (dhdyawpp + dhdyawcp + dhdyawmp + dhdyawpc + dhdyawcc + dhdyawmc + dhdyawpm + dhdyawcm + dhdyawmm) / 9.0f;
 
                 // Update Constraints
@@ -216,10 +250,6 @@ class MPC{
 
                 // Update Linear Cost
                 cost_q.segment(idx, LINEAR_STATE_LENGTH) = -state_goal.transpose() * Px;
-                //const float Ph = 0.01f;
-                //cost_q(idx+0) -= Ph*dhdx;
-                //cost_q(idx+1) -= Ph*dhdy;
-                //cost_q(idx+2) -= Ph*dhdyaw;
         
             }
             
