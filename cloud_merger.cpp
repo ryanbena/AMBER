@@ -207,6 +207,69 @@ class CloudMerger : public rclcpp::Node
             latest_pose_ = *msg;
         }
 
+        void removeGroundPlane(const pcl::PointCloud<pcl::PointXYZI>::Ptr& input_cloud, pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_removed_cloud){
+            
+            pcl::PointIndices::Ptr ground_candidate_indices(new pcl::PointIndices);
+            pcl::PointCloud<pcl::PointXYZI>::Ptr ground_candidates(new pcl::PointCloud<pcl::PointXYZI>);
+            
+            // Get pose values
+            float rx = latest_pose_.position[0];
+            float ry = latest_pose_.position[1];
+
+            for (size_t i = 0; i < input_cloud->points.size(); ++i) {
+                const auto& pt = input_cloud->points[i];
+                // center points
+                float xi = pt.x - rx;
+                float yi = pt.y - ry;
+                float zi = pt.z;
+
+                if (pt.z < 0.05){// &&  std::abs(xi) <= range_crop+0.5 && std::abs(yi) <= range_crop+0.5 ) {
+                    ground_candidates->points.push_back(pt);
+                    ground_candidate_indices->indices.push_back(i);
+                }
+            }
+            ground_candidates->width = ground_candidates->points.size();
+            ground_candidates->height = 1;
+
+            if (ground_candidates->empty()) {
+                std::cout << "No ground candidates found under Z threshold." << std::endl;
+                *ground_removed_cloud = *input_cloud;  // Return unmodified cloud
+                return;
+            }
+
+            sensor_msgs::msg::PointCloud2 livox_raw;
+            pcl::toROSMsg(*ground_candidates, livox_raw);
+
+            livox_raw.header.stamp = this->now();
+            livox_raw.header.frame_id = "odom"; 
+            livox_pub_ -> publish(livox_raw);
+
+            // Create the segmentation object
+            pcl::SACSegmentation<pcl::PointXYZI> seg;            
+            pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+            pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+
+            seg.setOptimizeCoefficients(true);
+            seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
+            seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0));        // Prefer planes perpendicular to Z (i.e. horizontal)
+            seg.setMethodType(pcl::SAC_RANSAC);
+            seg.setDistanceThreshold(0.05);  // Adjust this threshold based on sensor noise
+            seg.setInputCloud(ground_candidates);
+            seg.segment(*inliers, *coefficients);
+
+            pcl::PointIndices::Ptr full_cloud_inliers(new pcl::PointIndices);
+            for (int idx : inliers->indices) {
+                full_cloud_inliers->indices.push_back(ground_candidate_indices->indices[idx]);
+            }
+
+            // Extract non-ground (outlier) points
+            pcl::ExtractIndices<pcl::PointXYZI> extract;
+            extract.setInputCloud(input_cloud);
+            extract.setIndices(full_cloud_inliers);
+            extract.setNegative(true);  // True = remove inliers (i.e., remove the plane)
+            extract.filter(*ground_removed_cloud);s
+        }
+
         //  CREATE GAUSSIAN KERNEL
         cv::Mat gaussian_kernel(int kernel_size, float sigma, bool normalize){
             // Create kernel_sizexkernel_size array of floats
