@@ -15,6 +15,11 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+// Ground detection
+#include <pcl/filters/extract_indices.h>
+#include <pcl/ModelCoefficients.h>
+#include <pcl/segmentation/sac_segmentation.h>
+
 #include <cmath>
 #include <Eigen/Dense>
 
@@ -25,7 +30,7 @@ bool initialized = false;
 
 const float minx = 0.75;
 const float miny = 0.18;
-const float minZ = 0.2;
+const float minZ = 0.1;
 const float maxZ = 1.5;
 const float maxXY = 2.0;
 const float grid_length = 60;
@@ -40,14 +45,15 @@ class CloudMerger : public rclcpp::Node
         CloudMerger()
         : Node("cloud_merger"){
             livox_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                "/livox/points", 10, std::bind(&CloudMerger::lidar_callback, this, std::placeholders::_1));
+                "/livox/lidar", 10, std::bind(&CloudMerger::lidar_callback, this, std::placeholders::_1));
             utlidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 "/utlidar/cloud_deskewed", 10, std::bind(&CloudMerger::combined_callback, this, std::placeholders::_1));
             robot_pose_sub_ = this->create_subscription<unitree_go::msg::SportModeState>(
                 "sportmodestate", 10,std::bind(&CloudMerger::pose_callback, this, std::placeholders::_1));
-            unmasked_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("unmasked_combined", 10);
-            raw_grid_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("map_convert", 10);
-            binary_grid_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("occupancy_grid", 10);
+            // livox_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("livox_comb", 10);
+            unmasked_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("unmasked_combined2", 10);
+            raw_grid_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("map_convert2", 10);
+            binary_grid_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("occupancy_grid2", 10);
 
             combined_cloud_.reset(new pcl::PointCloud<pcl::PointXYZI>());
 
@@ -78,10 +84,11 @@ class CloudMerger : public rclcpp::Node
 
             pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_no_ground(new pcl::PointCloud<pcl::PointXYZI>);
             removeGroundPlane(combined_cloud_, cloud_no_ground);
-            pcl::PointCloud<pcl::PointXYZI>::Ptr odom_cloud (new pcl::PointCloud<pcl::PointXYZI>);
-            pcl::fromROSMsg(*msg, *odom_cloud);
 
-            *odom_cloud += *combined_cloud_;
+            // pcl::PointCloud<pcl::PointXYZI>::Ptr odom_cloud (new pcl::PointCloud<pcl::PointXYZI>);
+            // pcl::fromROSMsg(*msg, *odom_cloud);
+
+            *odom_cloud += *cloud_no_ground;
 
             // Get pose values
             float rx = latest_pose_.position[0];
@@ -209,69 +216,6 @@ class CloudMerger : public rclcpp::Node
             latest_pose_ = *msg;
         }
 
-        void removeGroundPlane(const pcl::PointCloud<pcl::PointXYZI>::Ptr& input_cloud, pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_removed_cloud){
-            
-            pcl::PointIndices::Ptr ground_candidate_indices(new pcl::PointIndices);
-            pcl::PointCloud<pcl::PointXYZI>::Ptr ground_candidates(new pcl::PointCloud<pcl::PointXYZI>);
-            
-            // Get pose values
-            float rx = latest_pose_.position[0];
-            float ry = latest_pose_.position[1];
-
-            for (size_t i = 0; i < input_cloud->points.size(); ++i) {
-                const auto& pt = input_cloud->points[i];
-                // center points
-                float xi = pt.x - rx;
-                float yi = pt.y - ry;
-                float zi = pt.z;
-
-                if (pt.z < 0.05){// &&  std::abs(xi) <= range_crop+0.5 && std::abs(yi) <= range_crop+0.5 ) {
-                    ground_candidates->points.push_back(pt);
-                    ground_candidate_indices->indices.push_back(i);
-                }
-            }
-            ground_candidates->width = ground_candidates->points.size();
-            ground_candidates->height = 1;
-
-            if (ground_candidates->empty()) {
-                std::cout << "No ground candidates found under Z threshold." << std::endl;
-                *ground_removed_cloud = *input_cloud;  // Return unmodified cloud
-                return;
-            }
-
-            sensor_msgs::msg::PointCloud2 livox_raw;
-            pcl::toROSMsg(*ground_candidates, livox_raw);
-
-            livox_raw.header.stamp = this->now();
-            livox_raw.header.frame_id = "odom"; 
-            livox_pub_ -> publish(livox_raw);
-
-            // Create the segmentation object
-            pcl::SACSegmentation<pcl::PointXYZI> seg;            
-            pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
-            pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-
-            seg.setOptimizeCoefficients(true);
-            seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
-            seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0));        // Prefer planes perpendicular to Z (i.e. horizontal)
-            seg.setMethodType(pcl::SAC_RANSAC);
-            seg.setDistanceThreshold(0.05);  // Adjust this threshold based on sensor noise
-            seg.setInputCloud(ground_candidates);
-            seg.segment(*inliers, *coefficients);
-
-            pcl::PointIndices::Ptr full_cloud_inliers(new pcl::PointIndices);
-            for (int idx : inliers->indices) {
-                full_cloud_inliers->indices.push_back(ground_candidate_indices->indices[idx]);
-            }
-
-            // Extract non-ground (outlier) points
-            pcl::ExtractIndices<pcl::PointXYZI> extract;
-            extract.setInputCloud(input_cloud);
-            extract.setIndices(full_cloud_inliers);
-            extract.setNegative(true);  // True = remove inliers (i.e., remove the plane)
-            extract.filter(*ground_removed_cloud);
-        }
-
         //  CREATE GAUSSIAN KERNEL
         cv::Mat gaussian_kernel(int kernel_size, float sigma, bool normalize){
             // Create kernel_sizexkernel_size array of floats
@@ -374,6 +318,68 @@ class CloudMerger : public rclcpp::Node
             grid_msg.data = binary_map;
             return grid_msg;
         }
+        void removeGroundPlane(const pcl::PointCloud<pcl::PointXYZI>::Ptr& input_cloud,
+                       pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_removed_cloud)  {
+            pcl::PointIndices::Ptr ground_candidate_indices(new pcl::PointIndices);
+            pcl::PointCloud<pcl::PointXYZI>::Ptr ground_candidates(new pcl::PointCloud<pcl::PointXYZI>);
+            
+            // Get pose values
+            float rx = latest_pose_.position[0];
+            float ry = latest_pose_.position[1];
+
+            for (size_t i = 0; i < input_cloud->points.size(); ++i) {
+                const auto& pt = input_cloud->points[i];
+                // center points
+                float xi = pt.x - rx;
+                float yi = pt.y - ry;
+                float zi = pt.z;
+
+                if (pt.z < 0.05){// &&  std::abs(xi) <= range_crop+0.5 && std::abs(yi) <= range_crop+0.5 ) {
+                    ground_candidates->points.push_back(pt);
+                    ground_candidate_indices->indices.push_back(i);
+                }
+            }
+            ground_candidates->width = ground_candidates->points.size();
+            ground_candidates->height = 1;
+
+            if (ground_candidates->empty()) {
+                std::cout << "No ground candidates found under Z threshold." << std::endl;
+                *ground_removed_cloud = *input_cloud;  // Return unmodified cloud
+                return;
+            }
+
+            sensor_msgs::msg::PointCloud2 livox_raw;
+            pcl::toROSMsg(*ground_candidates, livox_raw);
+
+            livox_raw.header.stamp = this->now();
+            livox_raw.header.frame_id = "odom"; 
+            livox_pub_ -> publish(livox_raw);
+
+            // Create the segmentation object
+            pcl::SACSegmentation<pcl::PointXYZI> seg;            
+            pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+            pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+
+            seg.setOptimizeCoefficients(true);
+            seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
+            seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0));        // Prefer planes perpendicular to Z (i.e. horizontal)
+            seg.setMethodType(pcl::SAC_RANSAC);
+            seg.setDistanceThreshold(0.05);  // Adjust this threshold based on sensor noise
+            seg.setInputCloud(ground_candidates);
+            seg.segment(*inliers, *coefficients);
+
+            pcl::PointIndices::Ptr full_cloud_inliers(new pcl::PointIndices);
+            for (int idx : inliers->indices) {
+                full_cloud_inliers->indices.push_back(ground_candidate_indices->indices[idx]);
+            }
+
+            // Extract non-ground (outlier) points
+            pcl::ExtractIndices<pcl::PointXYZI> extract;
+            extract.setInputCloud(input_cloud);
+            extract.setIndices(full_cloud_inliers);
+            extract.setNegative(true);  // True = remove inliers (i.e., remove the plane)
+            extract.filter(*ground_removed_cloud);
+        }
     
             rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr livox_sub_;
             rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr utlidar_sub_;
@@ -381,6 +387,7 @@ class CloudMerger : public rclcpp::Node
             rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr unmasked_pub_;
             rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr raw_grid_pub_;
             rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr binary_grid_pub_;
+            rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr livox_pub_;
 
             std::shared_ptr<tf2_ros::StaticTransformBroadcaster> static_broadcaster_;
 
@@ -396,6 +403,8 @@ class CloudMerger : public rclcpp::Node
             
             cv::Mat old_conf = cv::Mat::zeros(grid_length, grid_length, CV_32F);
             cv::Mat buffered_binary = cv::Mat::zeros(grid_length, grid_length, CV_32F);
+            double roll_ground = 0.0;
+            double pitch_ground = 0.0;
 };
 int main(int argc, char *argv[])
 {
