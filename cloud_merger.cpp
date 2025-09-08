@@ -75,7 +75,9 @@ class CloudMerger : public rclcpp::Node
             auto start = std::chrono::steady_clock::now();
             dt = start-t;
             t=start;
-            
+
+            pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_no_ground(new pcl::PointCloud<pcl::PointXYZI>);
+            removeGroundPlane(combined_cloud_, cloud_no_ground);
             pcl::PointCloud<pcl::PointXYZI>::Ptr odom_cloud (new pcl::PointCloud<pcl::PointXYZI>);
             pcl::fromROSMsg(*msg, *odom_cloud);
 
