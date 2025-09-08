@@ -50,7 +50,7 @@ class CloudMerger : public rclcpp::Node
                 "/utlidar/cloud_deskewed", 10, std::bind(&CloudMerger::combined_callback, this, std::placeholders::_1));
             robot_pose_sub_ = this->create_subscription<unitree_go::msg::SportModeState>(
                 "sportmodestate", 10,std::bind(&CloudMerger::pose_callback, this, std::placeholders::_1));
-            // livox_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("livox_comb", 10);
+            livox_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("livox_comb", 10);
             unmasked_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("unmasked_combined2", 10);
             raw_grid_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("map_convert2", 10);
             binary_grid_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("occupancy_grid2", 10);
@@ -85,8 +85,8 @@ class CloudMerger : public rclcpp::Node
             pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_no_ground(new pcl::PointCloud<pcl::PointXYZI>);
             removeGroundPlane(combined_cloud_, cloud_no_ground);
 
-            // pcl::PointCloud<pcl::PointXYZI>::Ptr odom_cloud (new pcl::PointCloud<pcl::PointXYZI>);
-            // pcl::fromROSMsg(*msg, *odom_cloud);
+            pcl::PointCloud<pcl::PointXYZI>::Ptr odom_cloud (new pcl::PointCloud<pcl::PointXYZI>);
+            pcl::fromROSMsg(*msg, *odom_cloud);
 
             *odom_cloud += *cloud_no_ground;
 
@@ -368,6 +368,7 @@ class CloudMerger : public rclcpp::Node
             seg.setInputCloud(ground_candidates);
             seg.segment(*inliers, *coefficients);
 
+
             pcl::PointIndices::Ptr full_cloud_inliers(new pcl::PointIndices);
             for (int idx : inliers->indices) {
                 full_cloud_inliers->indices.push_back(ground_candidate_indices->indices[idx]);
@@ -379,6 +380,7 @@ class CloudMerger : public rclcpp::Node
             extract.setIndices(full_cloud_inliers);
             extract.setNegative(true);  // True = remove inliers (i.e., remove the plane)
             extract.filter(*ground_removed_cloud);
+
         }
     
             rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr livox_sub_;
