@@ -269,7 +269,7 @@ class CloudMerger : public rclcpp::Node
             extract.setInputCloud(input_cloud);
             extract.setIndices(full_cloud_inliers);
             extract.setNegative(true);  // True = remove inliers (i.e., remove the plane)
-            extract.filter(*ground_removed_cloud);s
+            extract.filter(*ground_removed_cloud);
         }
 
         //  CREATE GAUSSIAN KERNEL
