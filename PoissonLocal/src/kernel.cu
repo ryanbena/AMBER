@@ -7,7 +7,7 @@
 namespace Kernel{
 
     // Memory sizes
-    const int nElem = IMAX * JMAX * QMAX * TMAX;
+    const int nElem = IMAX * JMAX * QMAX;
     size_t grid_size = nElem * sizeof(float);
 
     // Kernel Parameters
@@ -15,8 +15,8 @@ namespace Kernel{
     const int blocksPerGrid = (nElem + threadsPerBlock - 1) / threadsPerBlock;
 
     // Poisson Solver Parameters
-    const int max_iters = 1000;
-    const int iter_per_epoch = 10;
+    const int max_iters = 100;
+    const int iter_per_epoch = 20;
     int max_epoch = max_iters / iter_per_epoch;
 
     // Allocate memory on the device
@@ -100,7 +100,7 @@ namespace Kernel{
         cudaStreamSynchronize(stream);
 
         int epoch;
-        for(epoch = 1; epoch <= max_epoch; epoch++){
+        for(epoch = 0; epoch < max_epoch; epoch++){
             // Update Cells in Checkerboard Pattern to Enable Parallel SOR
             for(int iter = 0; iter < iter_per_epoch-1; iter++){
                 updateRedGrid<<<blocksPerGrid, threadsPerBlock>>>(h_grid, f_grid, b_grid, w_SOR, nElem, JMAX); // Update All "Red" Cells
@@ -111,8 +111,11 @@ namespace Kernel{
             cudaMemcpy(rss_pt, &rss, sizeof(float), cudaMemcpyHostToDevice);
             updateResidual<<<blocksPerGrid, threadsPerBlock, threadsPerBlock*sizeof(float)>>>(h_grid, f_grid, b_grid, rss_pt, nElem, JMAX); // One Gauss-Seidel Iteration to Compute Residual
             cudaMemcpy(&rss, rss_pt, sizeof(float), cudaMemcpyDeviceToHost);
-            rss = sqrtf(rss) * DS / (float)(QMAX*TMAX);
-            if(rss < relTol) break;
+            rss = sqrtf(rss) * DS / QMAX;
+            if(rss < relTol){
+                epoch++;
+                break;
+            }
         
         }
         
