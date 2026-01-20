@@ -3,30 +3,20 @@
 #define IMAX 120 // Grid X Size
 #define JMAX 120 // Grid Y Size
 #define DS 0.0333333333f
+//#define DS 0.0416666666f
 //#define DS 0.05f
-//#define DS 0.08333333f
 
-//#define QMAX 36 // Grid Q Size
-//#define DQ 0.1745f // Angular Grid Resolution
-//#define QMAX 30 // Grid Q Size
-//#define DQ 0.2094f // Angular Grid Resolution
-//#define QMAX 20 // Grid Q Size
-//#define DQ 0.3142f // Angular Grid Resolution
-//#define QMAX 18 // Grid Q Size
-//#define DQ 0.3491f // Angular Grid Resolution
-//#define QMAX 15 // Grid Q Size
-//#define DQ 0.4189f // Angular Grid Resolution
-//#define QMAX 12 // Grid Q Size
-//#define DQ 0.5236f // Angular Grid Resolution
-//#define QMAX 1 // Grid Q Size
-//#define DQ 6.283f // Angular Grid Resolution
+// #define IMAX 60 // Grid X Size
+// #define JMAX 60 // Grid Y Size
+// #define DS 0.0666666666f
 
-//#define QMAX 18 // Grid Q Size
-//#define DQ 0.174533f // Angular Grid Resolution
-#define QMAX 10 // Grid Q Size
-#define DQ 0.314159f // Angular Grid Resolution
+#define MAX_SQP_ITERS 20
 
-#define TMAX 11 // Grid T Size
-#define DT 0.1f // MPC Step Size
+#define TMAX 16
+#define DT 0.0666f
+//#define DT 0.3f
 
-#define WN 2.0f // CBF Value
+#define QMAX 10
+#define DQ 0.31415926536f
+//#define QMAX 18
+//#define DQ 0.1745329252f
